@@ -4753,15 +4753,38 @@ class HamobileBanhang {
         this.posMobileStep = step;
         this.loadPage('sales');
     }
+    
+    getProductStockCount(p) {
+        if (!p) return 0;
+        if (p.hasImei && Array.isArray(p.imeis)) {
+            return p.stock != null ? p.stock : p.imeis.length;
+        }
+        return Number(p.stock) || 0;
+    }
+
     renderPOSMobileStep1Products(searchTerm) {
         const term = (searchTerm || '').trim().toLowerCase();
         let products = (this.demoData.products || []).slice();
         if (term) {
             products = products.filter(p => this.productMatchesSearchQuery(p, term));
-            products.sort((a, b) => this.productSearchRelevance(b, term) - this.productSearchRelevance(a, term));
-        } else {
-            products = [...products].reverse();
         }
+
+        // Ưu tiên xếp Sản phẩm CÒN HÀNG lên trên Sản phẩm HẾT HÀNG
+        products.sort((a, b) => {
+            const stockA = this.getProductStockCount(a) > 0 ? 1 : 0;
+            const stockB = this.getProductStockCount(b) > 0 ? 1 : 0;
+            if (stockA !== stockB) {
+                return stockB - stockA; // Còn hàng (1) lên trước Hết hàng (0)
+            }
+            if (term) {
+                const relA = this.productSearchRelevance ? this.productSearchRelevance(a, term) : 0;
+                const relB = this.productSearchRelevance ? this.productSearchRelevance(b, term) : 0;
+                if (relA !== relB) {
+                    return relB - relA;
+                }
+            }
+            return this.getProductStockCount(b) - this.getProductStockCount(a);
+        });
         if (!products.length) {
             return '<div style="padding: 24px; text-align: center; color: #6b7280; font-size: 14px;">Không tìm thấy sản phẩm</div>';
         }
@@ -10814,9 +10837,26 @@ class HamobileBanhang {
         if (!container) return;
 
         const term = (query || '').trim().toLowerCase();
-        let products = this.demoData.products || [];
+        let products = (this.demoData.products || []).slice();
 
         if (term) products = products.filter(product => this.productMatchesSearchQuery(product, term));
+
+        // Ưu tiên xếp Sản phẩm CÒN HÀNG lên trên Sản phẩm HẾT HÀNG
+        products.sort((a, b) => {
+            const stockA = this.getProductStockCount(a) > 0 ? 1 : 0;
+            const stockB = this.getProductStockCount(b) > 0 ? 1 : 0;
+            if (stockA !== stockB) {
+                return stockB - stockA; // Còn hàng (1) lên trước Hết hàng (0)
+            }
+            if (term) {
+                const relA = this.productSearchRelevance ? this.productSearchRelevance(a, term) : 0;
+                const relB = this.productSearchRelevance ? this.productSearchRelevance(b, term) : 0;
+                if (relA !== relB) {
+                    return relB - relA;
+                }
+            }
+            return this.getProductStockCount(b) - this.getProductStockCount(a);
+        });
 
         if (!products.length) {
             container.innerHTML = '<div style="padding: 16px; text-align: center; color: #6b7280; font-size: 13px;">Không tìm thấy sản phẩm phù hợp</div>';
