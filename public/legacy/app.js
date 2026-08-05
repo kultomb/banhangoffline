@@ -3066,42 +3066,46 @@ class HamobileBanhang {
         // Tách số và chữ dính liền (VD: "ip13prm" -> "ip 13 prm", "s23u" -> "s 23 u")
         q = q.replace(/([a-zA-Z]+)(\d+)/g, '$1 $2').replace(/(\d+)([a-zA-Z]+)/g, '$1 $2');
         
-        // Bản đồ từ điển từ viết tắt ngành điện thoại
+        // Bản đồ từ điển từ viết tắt ngành điện thoại (Lựa chọn đồng nghĩa: Từ gốc OR các tổ hợp dịch)
         const aliasMap = {
-            'prm': ['pro', 'max'],
-            'pm': ['pro', 'max'],
-            'xsm': ['xs', 'max'],
-            'pr': ['pro'],
-            'ip': ['iphone'],
-            'iph': ['iphone'],
-            'pl': ['plus'],
-            'sam': ['samsung'],
-            'sn': ['samsung'],
-            'ult': ['ultra']
+            'prm': [ ['prm'], ['pro', 'max'], ['promax'] ],
+            'pm':  [ ['pm'],  ['pro', 'max'], ['promax'] ],
+            'xsm': [ ['xsm'], ['xs',  'max'], ['xsmax'] ],
+            'pr':  [ ['pr'],  ['pro'] ],
+            'ip':  [ ['ip'],  ['iphone'] ],
+            'iph': [ ['iph'], ['iphone'] ],
+            'pl':  [ ['pl'],  ['plus'] ],
+            'sam': [ ['sam'], ['samsung'] ],
+            'sn':  [ ['sn'],  ['samsung'] ],
+            'ult': [ ['ult'], ['ultra'] ]
         };
 
         const words = q.split(/\s+/).filter(w => w.length > 0);
-        const expandedWords = [];
+        const groups = [];
 
         words.forEach(w => {
-            const normW = this.toDau ? this.toDau(w) : w;
+            const normW = this.removeAccents(w);
             if (aliasMap[normW]) {
-                expandedWords.push(...aliasMap[normW]);
+                groups.push(aliasMap[normW]);
             } else {
-                expandedWords.push(normW);
+                groups.push([ [normW] ]);
             }
         });
 
-        return expandedWords;
+        return groups;
     }
 
     orderMatchesSearch(order, query) {
         if (!query || !query.trim()) return true;
         if (!order) return false;
-        const words = this.expandPhoneSearchKeywords(query);
-        if (words.length === 0) return true;
+        const groups = this.expandPhoneSearchKeywords(query);
+        if (groups.length === 0) return true;
         const targetText = this.getOrderSearchText(order);
-        return words.every(word => this.searchMatch(targetText, word));
+        return groups.every(groupOptions =>
+            groupOptions.some(optionWords =>
+                optionWords.every(word => this.searchMatch(targetText, word))
+            )
+        );
     }
     orderMatchesPeriod(order, period) {
         if (!order) return false;
@@ -13512,19 +13516,26 @@ class HamobileBanhang {
 
     productMatchesSearchQuery(p, q) {
         if (!q || !q.trim()) return true;
-        const words = this.expandPhoneSearchKeywords(q);
-        if (words.length === 0) return true;
+        const groups = this.expandPhoneSearchKeywords(q);
+        if (!groups.length) return true;
         const name = (p.name || '');
         const cat = (p.category || '');
         const id = (p.id || '');
         const barcode = (p.barcode || '');
         const imeiText = Array.isArray(p.imeis) ? p.imeis.join(' ') : '';
-        return words.every(word =>
+
+        const matchWord = (word) => (
             this.searchMatchWordBoundary(name, word) ||
             this.searchMatchWordBoundary(cat, word) ||
             this.searchMatch(id, word) ||
             this.searchMatch(barcode, word) ||
             this.searchMatch(imeiText, word)
+        );
+
+        return groups.every(groupOptions =>
+            groupOptions.some(optionWords =>
+                optionWords.every(word => matchWord(word))
+            )
         );
     }
     productMatchesCategoryFilter(p, catFilter) {
