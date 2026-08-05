@@ -3048,8 +3048,50 @@ class HamobileBanhang {
             orderLevelImeis
         ].filter(Boolean).join(' ');
     }
+    
+    expandPhoneSearchKeywords(query) {
+        if (!query) return [];
+        let q = query.trim().toLowerCase();
+        
+        // Tách số và chữ dính liền (VD: "ip13prm" -> "ip 13 prm", "s23u" -> "s 23 u")
+        q = q.replace(/([a-zA-Z]+)(\d+)/g, '$1 $2').replace(/(\d+)([a-zA-Z]+)/g, '$1 $2');
+        
+        // Bản đồ từ điển từ viết tắt ngành điện thoại
+        const aliasMap = {
+            'prm': ['pro', 'max'],
+            'pm': ['pro', 'max'],
+            'xsm': ['xs', 'max'],
+            'pr': ['pro'],
+            'ip': ['iphone'],
+            'iph': ['iphone'],
+            'pl': ['plus'],
+            'sam': ['samsung'],
+            'sn': ['samsung'],
+            'ult': ['ultra']
+        };
+
+        const words = q.split(/\s+/).filter(w => w.length > 0);
+        const expandedWords = [];
+
+        words.forEach(w => {
+            const normW = this.toDau ? this.toDau(w) : w;
+            if (aliasMap[normW]) {
+                expandedWords.push(...aliasMap[normW]);
+            } else {
+                expandedWords.push(normW);
+            }
+        });
+
+        return expandedWords;
+    }
+
     orderMatchesSearch(order, query) {
-        return this.searchMatch(this.getOrderSearchText(order), query);
+        if (!query || !query.trim()) return true;
+        if (!order) return false;
+        const words = this.expandPhoneSearchKeywords(query);
+        if (words.length === 0) return true;
+        const targetText = this.getOrderSearchText(order);
+        return words.every(word => this.searchMatch(targetText, word));
     }
     orderMatchesPeriod(order, period) {
         if (!order) return false;
@@ -13347,8 +13389,8 @@ class HamobileBanhang {
     }
 
     productMatchesSearchQuery(p, q) {
-        if (!q || !(q = q.trim().toLowerCase())) return true;
-        const words = q.split(/\s+/).filter(w => w.length > 0);
+        if (!q || !q.trim()) return true;
+        const words = this.expandPhoneSearchKeywords(q);
         if (words.length === 0) return true;
         const name = (p.name || '');
         const cat = (p.category || '');
