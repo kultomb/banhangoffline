@@ -13514,11 +13514,43 @@ class HamobileBanhang {
         this.loadPage('categories');
     }
 
+    extractNumbersFromText(text) {
+        if (!text) return [];
+        const q = String(text).toLowerCase()
+            .replace(/([a-zA-Z]+)(\d+)/g, '$1 $2')
+            .replace(/(\d+)([a-zA-Z]+)/g, '$1 $2');
+        const norm = this.removeAccents(q);
+        const matches = norm.match(/\b\d+\b/g);
+        return matches ? Array.from(new Set(matches)) : [];
+    }
+
+    hasModelNumberConflict(productName, query) {
+        const queryNumbers = this.extractNumbersFromText(query);
+        if (queryNumbers.length === 0) return false;
+
+        const nameNumbers = this.extractNumbersFromText(productName);
+        if (nameNumbers.length === 0) return false;
+
+        for (const qNum of queryNumbers) {
+            if (qNum.length <= 4) {
+                if (!nameNumbers.includes(qNum)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     productMatchesSearchQuery(p, q) {
         if (!q || !q.trim()) return true;
+
+        const name = (p.name || '');
+        if (this.hasModelNumberConflict(name, q)) {
+            return false;
+        }
+
         const groups = this.expandPhoneSearchKeywords(q);
         if (!groups.length) return true;
-        const name = (p.name || '');
         const cat = (p.category || '');
         const id = (p.id || '');
         const barcode = (p.barcode || '');

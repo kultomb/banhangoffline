@@ -1,16 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "HangHoa POS",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "identifier": "com.hanghoa.pos",
-
   "build": {
     "frontendDist": "../../public/legacy",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "",
     "beforeBuildCommand": ""
   },
-
   "app": {
     "windows": [
       {
@@ -30,12 +28,10 @@
         "skipTaskbar": false
       }
     ],
-
     "security": {
       "csp": null,
       "dangerousDisableAssetCspModification": false
     },
-
     "trayIcon": {
       "id": "main",
       "iconPath": "icons/icon.png",
@@ -45,10 +41,12 @@
       "tooltip": "HangHoa POS — Quản lý bán hàng"
     }
   },
-
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -66,7 +64,9 @@
       },
       "nsis": {
         "displayLanguageSelector": false,
-        "languages": ["English"],
+        "languages": [
+          "English"
+        ],
         "startMenuFolder": "HangHoa POS",
         "installMode": "perMachine"
       }
