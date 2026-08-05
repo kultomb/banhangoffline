@@ -18035,13 +18035,27 @@ class HamobileBanhang {
         this.showNotification(`Hiển thị ${filteredOrders.length} đơn hàng ${periodText}`, 'success');
     }
 
-    searchOrders(searchTerm) {
-        const q = (searchTerm || '').trim();
+    searchOrders(searchTerm, immediate = false) {
         this.ordersSearchQuery = searchTerm || '';
+        if (this._ordersSearchDebounceTimer) {
+            clearTimeout(this._ordersSearchDebounceTimer);
+            this._ordersSearchDebounceTimer = null;
+        }
+        if (immediate || !(searchTerm || '').trim()) {
+            this._executeSearchOrders(searchTerm);
+        } else {
+            this._ordersSearchDebounceTimer = setTimeout(() => {
+                this._ordersSearchDebounceTimer = null;
+                this._executeSearchOrders(searchTerm);
+            }, 180);
+        }
+    }
+
+    _executeSearchOrders(searchTerm) {
+        const q = (searchTerm || '').trim();
         const orders = this.demoData.orders || [];
         const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
         if (isMobile) {
-            // Mobile hiển thị card-list (.orders-mobile-list), không dùng table DOM.
             const per = this.ordersFilterPeriod || 'last7';
             const filteredOrders = orders.filter(order =>
                 !!order &&
@@ -18093,7 +18107,16 @@ class HamobileBanhang {
         const visibleOrders = periodOrders.filter(o => this.orderMatchesSearch(o, q));
         const visibleCount = visibleOrders.length;
         if (tbody) {
-            tbody.innerHTML = this.getOrderTableRowsHtml(visibleOrders, allOrders);
+            // Hiển thị tối đa 100 đơn hàng trên 1 trang để DOM không bị khựng
+            const renderLimit = 100;
+            const displayOrders = visibleOrders.slice(0, renderLimit);
+            let html = this.getOrderTableRowsHtml(displayOrders, allOrders);
+            if (visibleOrders.length > renderLimit) {
+                html += `<tr><td colspan="8" style="text-align: center; padding: 12px; background: #f9fafb; color: #6b7280; font-size: 13px;">
+                    Hiển thị <strong>${renderLimit}</strong> / <strong>${visibleOrders.length}</strong> đơn hàng. Hãy nhập từ khóa cụ thể hơn để thu hẹp kết quả.
+                </td></tr>`;
+            }
+            tbody.innerHTML = html;
         }
         const title = document.getElementById('orders-list-title');
         if (title) {
