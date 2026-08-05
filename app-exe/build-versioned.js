@@ -82,7 +82,6 @@ try {
 }
 
 const nsisDir = path.join(appExeDir, 'src-tauri', 'target', 'release', 'bundle', 'nsis');
-const msiDir = path.join(appExeDir, 'src-tauri', 'target', 'release', 'bundle', 'msi');
 const distDir = path.join(appExeDir, 'dist');
 
 if (!fs.existsSync(distDir)) {
@@ -96,17 +95,6 @@ if (fs.existsSync(nsisDir)) {
     files.forEach(file => {
         const oldPath = path.join(nsisDir, file);
         const newFileName = `HangHoa_POS_v${newVersion}_Setup.exe`;
-        const newPath = path.join(distDir, newFileName);
-        fs.copyFileSync(oldPath, newPath);
-        savedFiles.push(newPath);
-    });
-}
-
-if (fs.existsSync(msiDir)) {
-    const files = fs.readdirSync(msiDir).filter(f => f.endsWith('.msi'));
-    files.forEach(file => {
-        const oldPath = path.join(msiDir, file);
-        const newFileName = `HangHoa_POS_v${newVersion}_Installer.msi`;
         const newPath = path.join(distDir, newFileName);
         fs.copyFileSync(oldPath, newPath);
         savedFiles.push(newPath);
