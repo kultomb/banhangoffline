@@ -628,8 +628,6 @@ window.HaSecondaryBackup = (function () {
         if (!h) return false;
         try {
             var perm = await h.queryPermission({ mode: 'readwrite' });
-            if (perm === 'granted') return true;
-            perm = await h.requestPermission({ mode: 'readwrite' });
             return perm === 'granted';
         } catch (_) { return false; }
     }
@@ -705,6 +703,20 @@ window.HaSecondaryBackup = (function () {
 
         /* Ghi dữ liệu ra ổ phụ + rotation + checksum verify */
         writeData: async function (payload) {
+            if (typeof window !== 'undefined' && (window.__TAURI__ || window.__TAURI_INTERNALS__)) {
+                try {
+                    var invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+                        || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+                    if (invoke) {
+                        var jsonStr = JSON.stringify(payload, null, 2);
+                        await invoke('save_backup_file', { content: jsonStr });
+                        await invoke('write_pos_data', { content: jsonStr });
+                        return true;
+                    }
+                } catch (e) {
+                    console.warn('[SecondaryBackup] Tauri native save failed:', e);
+                }
+            }
             if (!this.isEnabled()) return false;
             var h = await _getValidHandle();
             if (!h) return false;
