@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/schema/capability",
+  "identifier": "default",
+  "description": "Quyền mặc định cho Hangho POS",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "fs:default",
+    "dialog:default"
+  ]
+}

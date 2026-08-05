@@ -6,7 +6,7 @@ function haLegacyDebugLog(tag, payload) {
         if (!on && typeof window !== 'undefined' && /(?:^|[?&])ha_debug=1(?:&|$)/.test(String(window.location.search || ''))) on = true;
         if (!on) return;
         console.log('[HaLegacy]', tag, payload);
-    } catch (_) {}
+    } catch (_) { }
 }
 
 /* ❌ DO NOT USE window.confirm — dùng confirmAsync() hoặc haConfirmAsync(). */
@@ -27,7 +27,7 @@ function haLegacyDebugLog(tag, payload) {
                     '[Hangho] Do not use window.confirm — use confirmAsync() or haConfirmAsync().',
                 );
             }
-        } catch (_) {}
+        } catch (_) { }
         return win.__haNativeConfirm.apply(win, arguments);
     };
     win.confirmAsync = function (optsOrMsg) {
@@ -163,26 +163,26 @@ async function haWaitForProxyAuthReady() {
             var init = await fs._proxyFetchInit({ method: 'GET' });
             var authz = init.headers && init.headers['Authorization'];
             if (authz && String(authz).length > 30) return true;
-        } catch (e) {}
+        } catch (e) { }
         await new Promise(function (r) { setTimeout(r, 100); });
     }
     return false;
 }
 /** Fallback khi parent.__hanghoGetIdToken chưa sẵn sàng hoặc Edge chặn gọi trực tiếp — postMessage cùng origin. */
 async function haRequestIdTokenFromParentViaPostMessage() {
-    return new Promise(function(resolve) {
+    return new Promise(function (resolve) {
         if (typeof window === 'undefined' || window.parent === window) {
             resolve(null);
             return;
         }
         var id = 'ha_' + Date.now() + '_' + Math.floor(Math.random() * 1e9);
         var done = false;
-        var to = setTimeout(function() { finish(null); }, 4500);
+        var to = setTimeout(function () { finish(null); }, 4500);
         function finish(v) {
             if (done) return;
             done = true;
             clearTimeout(to);
-            try { window.removeEventListener('message', onMsg); } catch (_) {}
+            try { window.removeEventListener('message', onMsg); } catch (_) { }
             resolve(v || null);
         }
         function onMsg(e) {
@@ -191,7 +191,7 @@ async function haRequestIdTokenFromParentViaPostMessage() {
                 var d = e.data;
                 if (!d || d.type !== 'HANGHO_ID_TOKEN' || d.requestId !== id) return;
                 finish(d.token);
-            } catch (_) {}
+            } catch (_) { }
         }
         window.addEventListener('message', onMsg);
         try {
@@ -223,7 +223,7 @@ function haMergePosDataOnConflict(originalLocal, pendingLocal, serverLatest) {
             if (stockDelta === 0) return sp;
             return Object.assign({}, sp, { stock: Math.max(0, (Number(sp.stock) || 0) + stockDelta) });
         });
-    } catch (_) {}
+    } catch (_) { }
 
     // Orders: gộp đơn mới của thiết bị này vào danh sách đã có trên server
     try {
@@ -232,7 +232,7 @@ function haMergePosDataOnConflict(originalLocal, pendingLocal, serverLatest) {
         var newOrders = (Array.isArray(pendingLocal.orders) ? pendingLocal.orders : [])
             .filter(function (o) { return o && o.id && !origOrderIds.has(o.id) && !srvOrderIds.has(o.id); });
         merged.orders = (serverLatest.orders || []).concat(newOrders);
-    } catch (_) {}
+    } catch (_) { }
 
     // Repairs: gộp phiếu sửa chữa mới
     try {
@@ -241,7 +241,7 @@ function haMergePosDataOnConflict(originalLocal, pendingLocal, serverLatest) {
         var newReps = (Array.isArray(pendingLocal.repairs) ? pendingLocal.repairs : [])
             .filter(function (r) { return r && r.id && !origRepIds.has(r.id) && !srvRepIds.has(r.id); });
         merged.repairs = (serverLatest.repairs || []).concat(newReps);
-    } catch (_) {}
+    } catch (_) { }
 
     // Các trường metadata: dùng giá trị của thiết bị này (customers, categories, settings)
     ['customers', 'categories', 'settings'].forEach(function (f) {
@@ -290,7 +290,7 @@ function haMergePosDataOnConflict(originalLocal, pendingLocal, serverLatest) {
                 if (typeof app.showNotification === 'function') {
                     app.showNotification('✅ Đã đồng bộ dữ liệu từ thiết bị khác', 'success', 2500);
                 }
-            }).catch(function () {});
+            }).catch(function () { });
         } else {
             if (typeof app.showNotification === 'function') {
                 app.showNotification('📡 Thiết bị khác vừa cập nhật dữ liệu. Lưu xong rồi tải lại để đồng bộ.', 'info', 6000);
@@ -299,466 +299,480 @@ function haMergePosDataOnConflict(originalLocal, pendingLocal, serverLatest) {
     });
 }());
 
-window.FirebaseStorage = {
-    _cache: { data: null, company: {}, meta: {} },
-    _config: null,
-    MAX_ROLLING_SNAPSHOTS: 48,
-    getConfig() {
+/**
+ * ============================================================
+ * OFFLINE LOCAL STORAGE BACKEND — thay thế Firebase hoàn toàn
+ * - Trình duyệt: lưu vào localStorage
+ * - Tauri desktop app: lưu vào file qua Tauri invoke API
+ * ============================================================
+ */
+window.FirebaseStorage = (function () {
+    var LS_KEY_LEGACY = 'ha_pos_offline_v2';   /* localStorage cũ — chỉ dùng để migrate */
+    var LS_SETTINGS = 'ha_pos_settings_v1';   /* localStorage cho settings nhỏ */
+    var SNAP_KEY = 'ha_pos_snapshots_v2';  /* snapshots nhỏ vẫn dùng localStorage */
+    var IDB_NAME = 'ha_pos_db_v1';
+    var IDB_STORE = 'main_store';
+    var IDB_KEY = 'pos_data';
+    var MAX_SNAPSHOTS = 48;
+    var OFFLINE_CFG = { url: 'offline', key: 'local' };
+    var _idbPromise = null; /* singleton connection */
+
+    /* ── Tauri helpers ─────────────────────────────────── */
+    function _isTauri() {
+        return typeof window !== 'undefined' &&
+            (typeof window.__TAURI_INTERNALS__ !== 'undefined' || typeof window.__TAURI__ !== 'undefined');
+    }
+    async function _tauriInvoke(cmd, args) {
         try {
-            if (window.__FIREBASE_CONFIG_ERROR && window.__FIREBASE_CONFIG_ERROR.error === 'missing_shop_context') {
-                return null;
+            var internals = window.__TAURI_INTERNALS__ || (window.__TAURI__ && window.__TAURI__.core);
+            if (internals && typeof internals.invoke === 'function') {
+                return await internals.invoke(cmd, args || {});
             }
-        } catch (_) {}
-        const cfg = window.FIREBASE_CONFIG || {};
-        if (this._config && this._config.url) {
-            const wUrl = String(cfg.url || '').trim().replace(/\/+$/, '');
-            const wKey = String(cfg.key || '').trim();
-            if (wUrl && wKey && (this._config.url !== wUrl || this._config.key !== wKey)) {
-                this._config = null;
-            } else {
-                return this._config;
+        } catch (e) { console.warn('[Storage] Tauri invoke failed:', cmd, e); }
+        return null;
+    }
+
+    /* ── IndexedDB helpers ─────────────────────────────── */
+    function _openIDB() {
+        if (_idbPromise) return _idbPromise;
+        _idbPromise = new Promise(function (resolve, reject) {
+            var req = indexedDB.open(IDB_NAME, 1);
+            req.onupgradeneeded = function (e) {
+                e.target.result.createObjectStore(IDB_STORE);
+            };
+            req.onsuccess = function (e) { resolve(e.target.result); };
+            req.onerror = function (e) { _idbPromise = null; reject(e.target.error); };
+            req.onblocked = function () { _idbPromise = null; reject(new Error('IDB blocked')); };
+        });
+        return _idbPromise;
+    }
+
+    async function _readIDB() {
+        var db = await _openIDB();
+        return new Promise(function (resolve, reject) {
+            var tx = db.transaction(IDB_STORE, 'readonly');
+            var req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+            req.onsuccess = function (e) { resolve(e.target.result || null); };
+            req.onerror = function (e) { reject(e.target.error); };
+        });
+    }
+
+    async function _writeIDB(data) {
+        var db = await _openIDB();
+        return new Promise(function (resolve, reject) {
+            var tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).put(data, IDB_KEY);
+            tx.oncomplete = function () { resolve(true); };
+            tx.onerror = function (e) { reject(e.target.error); };
+        });
+    }
+
+    /* ── Migration: localStorage cũ → IndexedDB (chạy 1 lần) ── */
+    async function _migrateFromLocalStorage() {
+        try {
+            var migrated = localStorage.getItem('ha_idb_migrated');
+            if (migrated) return; /* đã migrate rồi */
+            var raw = localStorage.getItem(LS_KEY_LEGACY);
+            if (!raw) { localStorage.setItem('ha_idb_migrated', '1'); return; }
+            var data = JSON.parse(raw);
+            await _writeIDB(data);
+            localStorage.setItem('ha_idb_migrated', '1');
+            localStorage.removeItem(LS_KEY_LEGACY); /* dọn sạch localStorage */
+            console.info('[Storage] Migrated data from localStorage → IndexedDB ✓');
+        } catch (e) { console.warn('[Storage] Migration error:', e); }
+    }
+
+    /* ── Read / Write tổng hợp ─────────────────────────── */
+    async function _read() {
+        /* Tauri: dùng file system của Rust */
+        if (_isTauri()) {
+            var content = await _tauriInvoke('read_pos_data');
+            if (content && content !== 'null') {
+                try { return JSON.parse(content); } catch (_) { }
             }
-        }
-        let url = String(cfg.url || '').trim().replace(/\/+$/, '');
-        let key = String(cfg.key || '').trim();
-        const proxy = url && String(url).includes('/api/rtdb');
-        if (!key && !proxy) {
-            try {
-                const queryShop = (new URLSearchParams(window.location.search).get('shop') || '')
-                    .trim()
-                    .toLowerCase()
-                    .replace(/[^a-z0-9-]/g, '');
-                if (queryShop) key = 'shop_' + queryShop;
-            } catch (_) {}
-        }
-        if (url && !key && !proxy) {
-            const seg = String(window.location.pathname || '').split('/').filter(Boolean)[0] || '';
-            const safeSeg = String(seg).toLowerCase().replace(/[^a-z0-9-]/g, '');
-            key = safeSeg && safeSeg !== 'legacy' ? ('shop_' + safeSeg) : '';
-        }
-        if (proxy && !key) {
             return null;
         }
-        if (url && key) {
-            this._config = { url, key };
-            return this._config;
-        }
-        return null;
-    },
-    setConfig(url, key) {
-        this._config = { url: (url||'').trim().replace(/\/+$/, ''), key: (key||'').trim() };
-        return this._config;
-    },
-    usesCloudProxyApi() {
-        const c = this.getConfig();
-        return !!(c && String(c.url || '').includes('/api/rtdb'));
-    },
-    async _proxyFetchInit(extra) {
-        const init = Object.assign({ credentials: 'include' }, extra || {});
-        if (!this.usesCloudProxyApi()) return init;
-        const headers = Object.assign({}, init.headers || {});
-        var tok = null;
+        /* Browser: IndexedDB primary, localStorage fallback */
         try {
-            var p = window.parent;
-            if (p && p !== window && typeof p.__hanghoGetIdToken === 'function') {
-                tok = await p.__hanghoGetIdToken();
-            }
-        } catch (e) {}
-        if (!tok || typeof tok !== 'string' || tok.length < 20) {
-            tok = await haRequestIdTokenFromParentViaPostMessage();
-        }
-        if (tok && typeof tok === 'string' && tok.length > 20) {
-            headers['Authorization'] = 'Bearer ' + tok;
-        }
-        init.headers = headers;
-        return init;
-    },
-    purgeLegacyLocalStorageKeys() {
+            await _migrateFromLocalStorage();
+            var data = await _readIDB();
+            if (data) return data;
+        } catch (e) { console.warn('[Storage] IDB read failed, fallback to LS:', e); }
+        /* Fallback localStorage (trình duyệt cũ / IDB lỗi) */
         try {
-            for (let i = 0; i < LEGACY_PURGE_LS_KEYS.length; i++) {
-                localStorage.removeItem(LEGACY_PURGE_LS_KEYS[i]);
-            }
-        } catch (_) {}
-    },
-    _logLoadTrace(result, hint) {
-        try {
-            const c = this.getConfig();
-            const last = window.__LAST_ERROR;
-            haLegacyDebugLog('LOAD_SOURCE', {
-                hint: hint || '',
-                hasData: !!(result && result.data && typeof result.data === 'object' && !Array.isArray(result.data)),
-                fromCloud: !!window._loadedFromCloud,
-                lastErrorCode: last && last.code ? last.code : null,
-                usesProxy: this.usesCloudProxyApi(),
-                backupKeyTail: c ? String(c.key || '').slice(-8) : '',
-            });
-        } catch (_) {}
-        return result;
-    },
-    _api(path) {
-        const c = this.getConfig();
-        if (!c) return null;
-        return '/api/rtdb/backups/' + encodeURIComponent(c.key) + '/' + path;
-    },
-    async load() {
-        window._haSyncLoadFailed = false;
-        window._lastFirebaseError = null;
-        const api = this._api('app.json');
-        if (!api) {
-            if (typeof handleAppError === 'function') {
-                handleAppError('unknown_error', { phase: 'load', reason: 'no_sync_path' }, { silent: true });
-            }
-            window._haSyncLoadFailed = true;
-            return this._logLoadTrace(null, 'no_api');
+            var raw = localStorage.getItem(LS_KEY_LEGACY);
+            return raw ? JSON.parse(raw) : null;
+        } catch (_) { return null; }
+    }
+
+    async function _write(data) {
+        /* Tauri: ghi file qua Rust */
+        if (_isTauri()) {
+            var result = await _tauriInvoke('write_pos_data', { content: JSON.stringify(data) });
+            return result !== false;
         }
-        if (this.usesCloudProxyApi()) {
-            var authOk = await haWaitForProxyAuthReady();
-            if (!authOk) {
-                if (typeof handleAppError === 'function') {
-                    handleAppError('unauthorized', { phase: 'load', reason: 'auth_not_ready' }, { silent: true });
-                }
-                window._haSyncLoadFailed = true;
-                return this._logLoadTrace(null, 'auth_timeout');
-            }
-        }
+        /* Browser: IndexedDB primary */
         try {
-            const _loadCtrl = new AbortController();
-            const _loadTimer = setTimeout(() => _loadCtrl.abort(), 16000);
-            var _loadRes;
-            try {
-                _loadRes = await fetch(api, await this._proxyFetchInit({ signal: _loadCtrl.signal }));
-            } finally {
-                clearTimeout(_loadTimer);
-            }
-            const res = _loadRes;
-            const resText = await res.text();
-            if (!res.ok) {
-                var parsedErr =
-                    typeof haParseSyncHttpError === 'function'
-                        ? haParseSyncHttpError(res.status, resText)
-                        : { code: 'unknown_error', serverError: '', serverMessage: '', requestId: undefined };
-                if (typeof handleAppError === 'function') {
-                    handleAppError(parsedErr.code, {
-                        phase: 'load',
-                        status: res.status,
-                        serverError: parsedErr.serverError,
-                        serverMessage: parsedErr.serverMessage,
-                        requestId: parsedErr.requestId,
-                        resource: 'app',
-                    }, { silent: true });
-                }
-                window._haSyncLoadFailed = true;
-                return this._logLoadTrace(null, 'http_' + res.status);
-            }
-            var json = null;
-            try {
-                json = resText ? JSON.parse(resText) : null;
-            } catch (parseEx) {
-                if (typeof handleAppError === 'function') {
-                    handleAppError('unknown_error', { phase: 'load', reason: 'invalid_body', resource: 'app' }, { silent: true });
-                }
-                window._haSyncLoadFailed = true;
-            }
-            const pkg = haNormalizeBackupPackage(json);
-            if (pkg) {
-                this._cache.data = pkg.data;
-                this._cache.company = pkg.company;
-                this._cache.meta = pkg.meta;
-                window._haSyncLoadFailed = false;
-                window._loadedFromCloud = true;
-                this.purgeLegacyLocalStorageKeys();
-                return this._logLoadTrace(this._cache, 'cloud_norm');
-            }
-            if (json != null && typeof json === 'object' && !Array.isArray(json)) {
-                if (typeof handleAppError === 'function') {
-                    handleAppError('unknown_error', { phase: 'load', reason: 'unreadable_package', resource: 'app' }, { silent: true });
-                }
-                window._haSyncLoadFailed = true;
-            }
+            await _writeIDB(data);
+            /* Ghi timestamp vào localStorage (nhỏ, nhanh — dùng để hiển thị "Lần lưu cuối") */
+            try { localStorage.setItem(LS_SETTINGS, JSON.stringify({ lastSave: new Date().toISOString() })); } catch (_) { }
+            return true;
         } catch (e) {
-            if (typeof handleAppError === 'function') {
-                handleAppError('network_error', { phase: 'load', cause: e && e.message ? e.message : String(e) }, { silent: true });
-            }
-            window._haSyncLoadFailed = true;
-            console.warn('Firebase load:', e);
-        }
-        try {
-            const legacyApi = this._api('data.json');
-            const legRes = await fetch(legacyApi, await this._proxyFetchInit());
-            const legText = await legRes.text();
-            if (!legRes.ok) {
-                if (!window._haSyncLoadFailed) {
-                    var p2 =
-                        typeof haParseSyncHttpError === 'function'
-                            ? haParseSyncHttpError(legRes.status, legText)
-                            : { code: 'unknown_error', serverError: '', serverMessage: '', requestId: undefined };
-                    if (typeof handleAppError === 'function') {
-                        handleAppError(p2.code, {
-                            phase: 'load',
-                            status: legRes.status,
-                            serverError: p2.serverError,
-                            serverMessage: p2.serverMessage,
-                            requestId: p2.requestId,
-                            resource: 'legacy',
-                        }, { silent: true });
-                    }
-                }
-                window._haSyncLoadFailed = true;
-                return this._logLoadTrace(null, 'legacy_http_fail');
-            }
-            var legJson = null;
-            try {
-                legJson = legText ? JSON.parse(legText) : null;
-            } catch (le) {
-                if (!window._haSyncLoadFailed && typeof handleAppError === 'function') {
-                    handleAppError('unknown_error', { phase: 'load', reason: 'invalid_body', resource: 'legacy' }, { silent: true });
-                }
-                window._haSyncLoadFailed = true;
-            }
-            const legPkg = haNormalizeBackupPackage(legJson);
-            if (legPkg) {
-                this._cache.data = legPkg.data;
-                this._cache.company = legPkg.company;
-                this._cache.meta = legPkg.meta;
-                window._haSyncLoadFailed = false;
-                window._loadedFromCloud = true;
-                this.purgeLegacyLocalStorageKeys();
-                return this._logLoadTrace(this._cache, 'legacy_data_json');
-            }
-            if (legJson != null && typeof legJson === 'object' && !Array.isArray(legJson) && !window._haSyncLoadFailed) {
-                if (typeof handleAppError === 'function') {
-                    handleAppError('unknown_error', { phase: 'load', reason: 'unreadable_package', resource: 'legacy' }, { silent: true });
-                }
-                window._haSyncLoadFailed = true;
-            }
-        } catch (e) {
-            console.warn('Firebase legacy load:', e);
-        }
-        window._loadedFromCloud = false;
-        return this._logLoadTrace(null, 'empty');
-    },
-    async peekAppJson() {
-        const api = this._api('app.json');
-        if (!api) return { ok: false, status: 0, json: null };
-        try {
-            const res = await fetch(api, await this._proxyFetchInit());
-            const text = await res.text();
-            let json = null;
-            if (text && text !== 'null') {
-                try { json = JSON.parse(text); } catch (_) { json = undefined; }
-            }
-            return { ok: res.ok, status: res.status, json };
-        } catch (e) {
-            return { ok: false, status: 0, json: null, error: e };
-        }
-    },
-    _applyLoadedJson(json) {
-        var pkg = haNormalizeBackupPackage(json);
-        if (!pkg) return false;
-        this._cache.data = pkg.data;
-        this._cache.company = pkg.company;
-        this._cache.meta = pkg.meta;
-        window._haSyncLoadFailed = false;
-        window._lastFirebaseError = null;
-        window._loadedFromCloud = true;
-        this.purgeLegacyLocalStorageKeys();
-        return true;
-    },
-    isLikelyBundledDemoData(data) {
-        try {
-            const c = data && data.customers;
-            const p = data && data.products;
-            if (!Array.isArray(c) || !Array.isArray(p) || c.length !== 5 || p.length !== 10) return false;
-            return c[0] && c[0].id === 'KH001' && c[0].name && String(c[0].name).includes('Hùng')
-                && p[0] && p[0].id === 'SP001' && String(p[0].name || '').includes('iPhone 15 Pro');
-        } catch (_) { return false; }
-    },
-    async save(payload, _retried) {
-        const mergedMeta = Object.assign({}, this._cache.meta || {}, payload.meta || {});
-        if (mergedMeta.schemaVersion == null) mergedMeta.schemaVersion = 1;
-        var wv = typeof mergedMeta.writeVersion === 'number' && Number.isFinite(mergedMeta.writeVersion) ? mergedMeta.writeVersion : 0;
-        const body = {
-            data: payload.data !== undefined ? payload.data : this._cache.data,
-            company: payload.company !== undefined ? payload.company : this._cache.company,
-            meta: Object.assign({}, mergedMeta, { clientBaseWriteVersion: wv })
-        };
-        const api = this._api('app.json');
-        if (!api) {
-            if (typeof handleAppError === 'function') {
-                handleAppError('unknown_error', { phase: 'save', reason: 'no_sync_path' }, { ui: 'toast' });
-            }
+            console.warn('[Storage] IDB write failed, fallback to LS:', e);
+            /* Fallback localStorage */
+            try { localStorage.setItem(LS_KEY_LEGACY, JSON.stringify(data)); return true; } catch (_) { }
             return false;
         }
+    }
+
+    function _readSnapsSync() {
         try {
-            const _saveCtrl = new AbortController();
-            const _saveTimer = setTimeout(() => _saveCtrl.abort(), 20000);
-            var _saveRes;
+            var raw = localStorage.getItem(SNAP_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch (_) { return {}; }
+    }
+
+    return {
+        _cache: { data: null, company: {}, meta: {} },
+        MAX_ROLLING_SNAPSHOTS: MAX_SNAPSHOTS,
+
+        getConfig: function () { return OFFLINE_CFG; },
+        setConfig: function (url, key) { return OFFLINE_CFG; },
+        usesCloudProxyApi: function () { return false; },
+        _proxyFetchInit: async function (extra) { return Object.assign({}, extra || {}); },
+
+        purgeLegacyLocalStorageKeys: function () {
             try {
-                _saveRes = await fetch(api, await this._proxyFetchInit({
-                    method: 'PUT',
-                    body: JSON.stringify(body),
-                    headers: { 'Content-Type': 'application/json' },
-                    signal: _saveCtrl.signal,
-                }));
-            } finally {
-                clearTimeout(_saveTimer);
+                for (var i = 0; i < LEGACY_PURGE_LS_KEYS.length; i++) {
+                    localStorage.removeItem(LEGACY_PURGE_LS_KEYS[i]);
+                }
+            } catch (_) { }
+        },
+
+        _logLoadTrace: function (result) { return result; },
+        _api: function () { return null; },
+
+        load: async function () {
+            window._haSyncLoadFailed = false;
+            window._lastFirebaseError = null;
+            window._loadedFromCloud = false;
+            var stored = await _read();
+            /* Nếu localStorage trống → thử load từ ổ phụ (D/E/USB) */
+            if (!stored && window.HaSecondaryBackup && window.HaSecondaryBackup.isEnabled()) {
+                try { stored = await window.HaSecondaryBackup.readData(); } catch (_) { }
+                if (stored) console.info('[Offline] Loaded from secondary drive backup.');
             }
-            const res = _saveRes;
-            const resText = await res.text();
-            if (res.ok) {
-                let saved = null;
-                try {
-                    saved = resText && resText !== 'null' ? JSON.parse(resText) : null;
-                } catch (eParse) {}
-                const d = body.data;
-                const hasBiz = d && (
-                    (Array.isArray(d.customers) && d.customers.length > 0) ||
-                    (Array.isArray(d.products) && d.products.length > 0) ||
-                    (Array.isArray(d.orders) && d.orders.length > 0)
-                );
-                var nextMeta = Object.assign({}, body.meta);
-                delete nextMeta.clientBaseWriteVersion;
-                if (Object.prototype.hasOwnProperty.call(nextMeta, 'isDemoSeed')) {
-                    nextMeta = Object.assign({}, nextMeta);
-                    delete nextMeta.isDemoSeed;
+            if (stored) {
+                var pkg = haNormalizeBackupPackage(stored);
+                if (pkg) {
+                    this._cache.data = pkg.data;
+                    this._cache.company = pkg.company;
+                    this._cache.meta = pkg.meta;
+                    return this._cache;
                 }
-                if (saved && typeof saved === 'object' && saved.meta && typeof saved.meta === 'object' && !Array.isArray(saved.meta)) {
-                    nextMeta = Object.assign({}, nextMeta, saved.meta);
-                }
-                if (hasBiz) {
-                    nextMeta = Object.assign({}, nextMeta, { cloud_initialized: 'true' });
-                }
+            }
+            /* Lần đầu chạy — dữ liệu trống */
+            this._cache.data = haEmptyShopDataRecord();
+            this._cache.company = {};
+            this._cache.meta = { schemaVersion: 1 };
+            return this._cache;
+        },
+
+        peekAppJson: async function () {
+            var stored = await _read();
+            return { ok: true, status: 200, json: stored };
+        },
+
+        _applyLoadedJson: function (json) {
+            var pkg = haNormalizeBackupPackage(json);
+            if (!pkg) return false;
+            this._cache.data = pkg.data;
+            this._cache.company = pkg.company;
+            this._cache.meta = pkg.meta;
+            window._haSyncLoadFailed = false;
+            window._lastFirebaseError = null;
+            window._loadedFromCloud = false;
+            return true;
+        },
+
+        isLikelyBundledDemoData: function (data) {
+            try {
+                var c = data && data.customers;
+                var p = data && data.products;
+                if (!Array.isArray(c) || !Array.isArray(p) || c.length !== 5 || p.length !== 10) return false;
+                return c[0] && c[0].id === 'KH001' && c[0].name && String(c[0].name).includes('Hùng')
+                    && p[0] && p[0].id === 'SP001' && String(p[0].name || '').includes('iPhone 15 Pro');
+            } catch (_) { return false; }
+        },
+
+        save: async function (payload) {
+            var mergedMeta = Object.assign({}, this._cache.meta || {}, payload.meta || {});
+            if (mergedMeta.schemaVersion == null) mergedMeta.schemaVersion = 1;
+            delete mergedMeta.clientBaseWriteVersion;
+            var body = {
+                data: payload.data !== undefined ? payload.data : this._cache.data,
+                company: payload.company !== undefined ? payload.company : this._cache.company,
+                meta: mergedMeta,
+                savedAt: new Date().toISOString(),
+            };
+            var ok = await _write(body);
+            if (ok) {
                 this._cache.data = body.data;
                 this._cache.company = body.company;
-                this._cache.meta = nextMeta;
-                delete this._cache.meta.clientBaseWriteVersion;
+                this._cache.meta = body.meta;
                 haEnsurePosDataArraysInPlace(this._cache.data);
-                const backupsApi = this._api('backups.json');
-                if (backupsApi) {
-                    const backupPayload = { lastSync: new Date().toISOString(), data: body.data, company: body.company, meta: this._cache.meta };
-                    fetch(backupsApi, await this._proxyFetchInit({
-                        method: 'PUT',
-                        body: JSON.stringify(backupPayload),
-                        headers: { 'Content-Type': 'application/json' },
-                    })).catch(() => {});
+                /* Tự động lưu ra ổ phụ (D/E/USB) sau mỗi lần save thành công */
+                if (window.HaSecondaryBackup && window.HaSecondaryBackup.isEnabled()) {
+                    window.HaSecondaryBackup.writeData(body).catch(function () { });
+                }
+            } else {
+                if (typeof handleAppError === 'function') {
+                    handleAppError('unknown_error', { phase: 'save', reason: 'storage_full' }, { ui: 'toast' });
+                }
+            }
+            return ok;
+        },
+
+        pushRollingSnapshot: async function (backupObj) {
+            window._lastSnapshotError = null;
+            if (!backupObj) return false;
+            try {
+                /* Snapshots chỉ dùng localStorage (dung lượng nhỏ) */
+                var snaps = _readSnapsSync();
+                var keys = Object.keys(snaps).map(function (k) { return parseInt(k, 10); })
+                    .filter(function (n) { return !isNaN(n); })
+                    .sort(function (a, b) { return a - b; });
+                while (keys.length >= MAX_SNAPSHOTS) { delete snaps[keys.shift()]; }
+                snaps[Date.now()] = backupObj;
+                try { localStorage.setItem(SNAP_KEY, JSON.stringify(snaps)); } catch (_) { }
+                /* Trong Tauri: cũng lưu backup file tự động */
+                if (_isTauri()) {
+                    _tauriInvoke('save_backup_file', { content: JSON.stringify(backupObj) }).catch(function () { });
                 }
                 return true;
+            } catch (e) {
+                window._lastSnapshotError = e && e.message ? e.message : String(e);
+                console.warn('[Offline] pushRollingSnapshot:', e);
+                return false;
             }
-            var pSave =
-                typeof haParseSyncHttpError === 'function'
-                    ? haParseSyncHttpError(res.status, resText)
-                    : { code: 'unknown_error', serverError: '', serverMessage: '', requestId: undefined };
-            if (pSave.code === 'stale_data' && !_retried) {
-                // Snapshot trạng thái trước khi reload (để tính delta)
-                const beforeReloadData = JSON.parse(JSON.stringify(this._cache.data || {}));
-                const latest = await this.load().catch(() => null);
-                const latestMeta = latest && latest.meta && typeof latest.meta === 'object' ? latest.meta : (this._cache.meta || {});
-                const retryMeta = Object.assign({}, payload.meta || {}, {
-                    writeVersion:
-                        typeof latestMeta.writeVersion === 'number' && Number.isFinite(latestMeta.writeVersion)
-                            ? latestMeta.writeVersion
-                            : 0,
-                });
-                // Smart merge: áp dụng thay đổi của thiết bị này lên dữ liệu mới nhất từ server
-                const mergedData = latest && latest.data
-                    ? haMergePosDataOnConflict(beforeReloadData, body.data, latest.data)
-                    : body.data;
-                return this.save({
-                    data: mergedData,
-                    company: body.company,
-                    meta: retryMeta,
-                }, true);
-            }
-            // Server 500 / network_error: retry 1 lần sau 2s (như Firebase silent retry)
-            if ((pSave.code === 'network_error' || pSave.code === 'unknown_error') && !_retried) {
-                await new Promise(function (r) { setTimeout(r, 2000); });
-                return this.save(payload, true);
-            }
-            if (typeof handleAppError === 'function') {
-                handleAppError(pSave.code, {
-                    phase: 'save',
-                    status: res.status,
-                    serverError: pSave.serverError,
-                    serverMessage: pSave.serverMessage,
-                    requestId: pSave.requestId,
-                }, { ui: 'toast', durationMs: 7000 });
-            }
-            return false;
-        } catch (e) {
-            // Exception-level error (timeout, fetch abort): retry 1 lần trước khi hiện lỗi
-            if (!_retried) {
-                await new Promise(function (r) { setTimeout(r, 2000); });
-                return this.save(payload, true);
-            }
-            if (typeof handleAppError === 'function') {
-                handleAppError('network_error', { phase: 'save', cause: e && e.message ? e.message : String(e) }, { ui: 'toast' });
-            }
-            console.warn('Firebase save:', e);
-        }
-        return false;
-    },
-    async pushRollingSnapshot(backupObj) {
-        window._lastSnapshotError = null;
-        if (!backupObj) return false;
-        const shallowUrl = this._api('snapshots.json');
-        if (!shallowUrl) return false;
+        },
+
+        retryPendingSync: async function () { return true; },
+        hasPendingSync: function () { return false; },
+
+        getData: function () {
+            haEnsurePosDataArraysInPlace(this._cache.data);
+            return this._cache.data;
+        },
+        setData: function (v) {
+            this._cache.data = v;
+            haEnsurePosDataArraysInPlace(this._cache.data);
+        },
+        getCompany: function () { return this._cache.company || {}; },
+        setCompany: function (v) { this._cache.company = v || {}; },
+        getMeta: function (k) { return (this._cache.meta || {})[k]; },
+        setMeta: function (k, v) { this._cache.meta = this._cache.meta || {}; this._cache.meta[k] = v; },
+    };
+}());
+/* OFFLINE MODE — không cần Firebase / Vercel / cloud */
+window.FIREBASE_CONFIG = window.FIREBASE_CONFIG || { url: 'offline', key: 'local' };
+window._offlineMode = true;
+
+/**
+ * ============================================================
+ * SECONDARY DRIVE BACKUP — tự động lưu ra ổ D / E / USB
+ * Dùng File System Access API (Chrome / Edge 86+)
+ * Primary: localStorage (ổ C)
+ * Secondary: file JSON trên ổ do user chọn (ổ D/E/USB/...)
+ * ============================================================
+ */
+window.HaSecondaryBackup = (function () {
+    var IDB_DB = 'ha_backup_dirs_v1';
+    var IDB_STORE = 'dirs';
+    var IDB_KEY = 'main';
+    var LS_ENABLED = 'ha_secondary_enabled';
+    var LS_NAME = 'ha_secondary_name';
+    var FILE_MAIN = 'hangho_pos_data.json';
+    var _handle = null; /* cached FileSystemDirectoryHandle */
+
+    function _openIDB() {
+        return new Promise(function (resolve, reject) {
+            var req = indexedDB.open(IDB_DB, 1);
+            req.onupgradeneeded = function (e) { e.target.result.createObjectStore(IDB_STORE); };
+            req.onsuccess = function (e) { resolve(e.target.result); };
+            req.onerror = function (e) { reject(e.target.error); };
+        });
+    }
+    async function _persistHandle(h) {
         try {
-            const r = await fetch(shallowUrl + '?shallow=true', await this._proxyFetchInit());
-            let keys = [];
-            if (r.ok) {
-                const t = await r.text();
-                if (t && t !== 'null') {
-                    try {
-                        const o = JSON.parse(t);
-                        if (o && typeof o === 'object' && !Array.isArray(o)) keys = Object.keys(o);
-                    } catch (_) {}
+            var db = await _openIDB();
+            await new Promise(function (resolve, reject) {
+                var tx = db.transaction(IDB_STORE, 'readwrite');
+                tx.objectStore(IDB_STORE).put(h, IDB_KEY);
+                tx.oncomplete = resolve; tx.onerror = reject;
+            });
+        } catch (_) { }
+    }
+    async function _restoreHandle() {
+        try {
+            var db = await _openIDB();
+            return await new Promise(function (resolve, reject) {
+                var tx = db.transaction(IDB_STORE, 'readonly');
+                var req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+                req.onsuccess = function (e) { resolve(e.target.result || null); };
+                req.onerror = reject;
+            });
+        } catch (_) { return null; }
+    }
+    async function _ensurePermission(h) {
+        if (!h) return false;
+        try {
+            var perm = await h.queryPermission({ mode: 'readwrite' });
+            if (perm === 'granted') return true;
+            perm = await h.requestPermission({ mode: 'readwrite' });
+            return perm === 'granted';
+        } catch (_) { return false; }
+    }
+    async function _getValidHandle() {
+        if (_handle && await _ensurePermission(_handle)) return _handle;
+        var stored = await _restoreHandle();
+        if (stored && await _ensurePermission(stored)) { _handle = stored; return _handle; }
+        return null;
+    }
+
+    return {
+        /* Trình duyệt có hỗ trợ không (Chrome/Edge 86+) */
+        isSupported: function () { return typeof window.showDirectoryPicker === 'function'; },
+
+        isEnabled: function () { return localStorage.getItem(LS_ENABLED) === '1'; },
+
+        getLabel: function () { return localStorage.getItem(LS_NAME) || ''; },
+
+        /* Người dùng chọn thư mục — gọi 1 lần từ nút bấm */
+        pickDirectory: async function () {
+            if (!this.isSupported()) return { ok: false, reason: 'unsupported' };
+            try {
+                var h = await window.showDirectoryPicker({ mode: 'readwrite', id: 'ha-secondary' });
+                _handle = h;
+                await _persistHandle(h);
+                localStorage.setItem(LS_ENABLED, '1');
+                localStorage.setItem(LS_NAME, h.name);
+                return { ok: true, name: h.name };
+            } catch (e) {
+                return { ok: false, reason: e.name === 'AbortError' ? 'cancelled' : e.message };
+            }
+        },
+
+        /* Hủy cấu hình */
+        clear: async function () {
+            _handle = null;
+            try { var db = await _openIDB(); var tx = db.transaction(IDB_STORE, 'readwrite'); tx.objectStore(IDB_STORE).delete(IDB_KEY); } catch (_) { }
+            localStorage.removeItem(LS_ENABLED);
+            localStorage.removeItem(LS_NAME);
+        },
+
+        /* Tính checksum đơn giản (djb2) để verify file sau khi ghi */
+        _checksum: function (str) {
+            var h = 5381;
+            for (var i = 0; i < str.length; i++) {
+                h = ((h << 5) + h) ^ str.charCodeAt(i);
+                h = h >>> 0;
+            }
+            return h.toString(16);
+        },
+
+        /* Lấy (hoặc tạo) thư mục con backups/daily/ */
+        _getDailyDir: async function (rootHandle) {
+            var backupsDir = await rootHandle.getDirectoryHandle('backups', { create: true });
+            return await backupsDir.getDirectoryHandle('daily', { create: true });
+        },
+
+        /* Xóa daily backup cũ hơn 7 ngày trong backups/daily/ */
+        _rotateBackups: async function (dailyDir) {
+            try {
+                var cutoff = Date.now() - 7 * 86400000;
+                var toDelete = [];
+                for await (var [name] of dailyDir.entries()) {
+                    var m = name.match(/^backup_(\d{4}-\d{2}-\d{2})\.json$/);
+                    if (!m) continue;
+                    if (new Date(m[1]).getTime() < cutoff) toDelete.push(name);
                 }
+                for (var fn of toDelete) {
+                    await dailyDir.removeEntry(fn).catch(function () { });
+                }
+            } catch (_) { }
+        },
+
+        /* Ghi dữ liệu ra ổ phụ + rotation + checksum verify */
+        writeData: async function (payload) {
+            if (!this.isEnabled()) return false;
+            var h = await _getValidHandle();
+            if (!h) return false;
+            try {
+                var json = JSON.stringify(payload, null, 2);
+                var checksum = this._checksum(json);
+
+                /* 1. Ghi hangho_pos_data.json (root) — luôn ghi đè */
+                var fh = await h.getFileHandle(FILE_MAIN, { create: true });
+                var w = await fh.createWritable();
+                await w.write(json); await w.close();
+
+                /* 2. Verify checksum */
+                var verify = await (await (await h.getFileHandle(FILE_MAIN)).getFile()).text();
+                if (this._checksum(verify) !== checksum) {
+                    console.error('[SecondaryBackup] Checksum mismatch!');
+                    return false;
+                }
+
+                /* 3. Ghi hangho_pos_meta.json (root) */
+                var meta = { checksum: checksum, size: json.length, savedAt: new Date().toISOString() };
+                var mw = await (await h.getFileHandle('hangho_pos_meta.json', { create: true })).createWritable();
+                await mw.write(JSON.stringify(meta, null, 2)); await mw.close();
+
+                /* 4. Ghi backups/daily/backup_YYYY-MM-DD.json */
+                var dailyDir = await this._getDailyDir(h);
+                var dateStr = new Date().toISOString().slice(0, 10);
+                var bw = await (await dailyDir.getFileHandle('backup_' + dateStr + '.json', { create: true })).createWritable();
+                await bw.write(json); await bw.close();
+
+                /* 5. Rotation: xóa daily cũ hơn 7 ngày */
+                await this._rotateBackups(dailyDir);
+
+                return true;
+            } catch (e) { console.warn('[SecondaryBackup] writeData:', e); return false; }
+        },
+
+        /* Đọc dữ liệu từ ổ phụ (dùng khi primary trống) */
+        readData: async function () {
+            var h = await _getValidHandle();
+            if (!h) return null;
+            try {
+                var fh = await h.getFileHandle(FILE_MAIN);
+                var file = await fh.getFile();
+                var text = await file.text();
+                return text ? JSON.parse(text) : null;
+            } catch (_) { return null; }
+        },
+
+        /* Yêu cầu cấp lại quyền sau khi restart trình duyệt */
+        requestPermissionIfNeeded: async function () {
+            if (!this.isEnabled()) return;
+            var stored = await _restoreHandle();
+            if (!stored) return;
+            var perm = await stored.queryPermission({ mode: 'readwrite' }).catch(function () { return 'denied'; });
+            if (perm !== 'granted') {
+                if (window.app && typeof window.app.showNotification === 'function') {
+                    window.app.showNotification(
+                        '💾 Nhấn vào đây để kích hoạt lại backup ổ phụ (' + this.getLabel() + ')',
+                        'info', 8000
+                    );
+                }
+            } else {
+                _handle = stored;
             }
-            keys = keys.map(function(k) { return parseInt(k, 10); }).filter(function(n) { return !isNaN(n); }).sort(function(a, b) { return a - b; });
-            while (keys.length >= this.MAX_ROLLING_SNAPSHOTS) {
-                const old = keys.shift();
-                const delUrl = this._api('snapshots/' + old + '.json');
-                if (delUrl) await fetch(delUrl, await this._proxyFetchInit({ method: 'DELETE' })).catch(function() {});
-            }
-            const id = Date.now();
-            const putUrl = this._api('snapshots/' + id + '.json');
-            const res = await fetch(putUrl, await this._proxyFetchInit({
-                method: 'PUT',
-                body: JSON.stringify(backupObj),
-                headers: { 'Content-Type': 'application/json' },
-            }));
-            if (!res.ok) {
-                const errText = await res.text().catch(function() { return ''; });
-                window._lastSnapshotError = 'HTTP ' + res.status + (errText ? ': ' + errText.slice(0, 200) : '');
-                console.warn('pushRollingSnapshot:', window._lastSnapshotError);
-            }
-            return res.ok;
-        } catch (e) {
-            window._lastSnapshotError = e && e.message ? e.message : String(e);
-            console.warn('pushRollingSnapshot:', e);
-            return false;
-        }
-    },
-    async retryPendingSync() {
-        return true;
-    },
-    hasPendingSync() {
-        return false;
-    },
-    getData() {
-        var d = this._cache.data;
-        haEnsurePosDataArraysInPlace(d);
-        return d;
-    },
-    setData(v) {
-        this._cache.data = v;
-        haEnsurePosDataArraysInPlace(this._cache.data);
-    },
-    getCompany() { return this._cache.company || {}; },
-    setCompany(v) { this._cache.company = v || {}; },
-    getMeta(k) { return (this._cache.meta || {})[k]; },
-    setMeta(k, v) { this._cache.meta = this._cache.meta || {}; this._cache.meta[k] = v; }
-};
+        },
+    };
+}());
 
 function escapeHtml(str) {
     if (str == null || str === undefined) return '';
@@ -793,7 +807,7 @@ function updateCompanyAssets() {
 }
 
 window.companyAssets = { logo: null, qr: null };
-setInterval(function() { updateCompanyAssets(); }, 30000);
+setInterval(function () { updateCompanyAssets(); }, 30000);
 
 class HamobileBanhang {
     constructor() {
@@ -850,7 +864,7 @@ class HamobileBanhang {
         this._saveDebounceMs = 500;
         this.initAsync();
     }
-    
+
     async initAsync() {
         const content = document.getElementById('main-content');
         if (content) content.innerHTML = '<div style="padding: 48px; text-align: center;"><p>Đang tải dữ liệu...</p><p style="font-size: 14px; color: #6b7280;">Vui lòng đợi...</p></div>';
@@ -906,7 +920,7 @@ class HamobileBanhang {
             if (maybeDefaultDemo && !localHadData) {
                 if (window.FirebaseStorage.usesCloudProxyApi()) {
                     if (content) content.innerHTML = '<div style="padding: 48px; text-align: center;"><p>Đang đồng bộ dữ liệu shop...</p><p style="font-size: 14px; color: #6b7280;">Vui lòng đợi...</p></div>';
-                    await new Promise(function(r) { setTimeout(r, 700); });
+                    await new Promise(function (r) { setTimeout(r, 700); });
                     const reloadPkg = await window.FirebaseStorage.load();
                     const pick = haIsLoadedPosPackage(reloadPkg) ? reloadPkg : loaded;
                     this.demoData = pick.data;
@@ -957,7 +971,7 @@ class HamobileBanhang {
         } else if (!window._haSyncLoadFailed) {
             // Có thể DB trống — xác minh lại (tránh ghi demo đè dữ liệu thật khi mạng/Firebase trả về tạm thời sai)
             if (content) content.innerHTML = '<div style="padding: 48px; text-align: center;"><p>Đang xác minh dữ liệu...</p><p style="font-size: 14px; color: #6b7280;">Vui lòng đợi...</p></div>';
-            await new Promise(function(r) { setTimeout(r, 400); });
+            await new Promise(function (r) { setTimeout(r, 400); });
             const peek = await window.FirebaseStorage.peekAppJson();
             if (peek.ok && window.FirebaseStorage._applyLoadedJson(peek.json)) {
                 const again = window.FirebaseStorage.getData();
@@ -984,7 +998,7 @@ class HamobileBanhang {
                 return;
             }
             if (window.FirebaseStorage.usesCloudProxyApi()) {
-                await new Promise(function(r) { setTimeout(r, 900); });
+                await new Promise(function (r) { setTimeout(r, 900); });
                 const loadedThird = await window.FirebaseStorage.load();
                 if (haIsLoadedPosPackage(loadedThird)) {
                     this.demoData = loadedThird.data;
@@ -1013,7 +1027,7 @@ class HamobileBanhang {
             if (content) content.innerHTML = '<div class="fade-in" style="padding: 48px; max-width: 560px; margin: 0 auto;"><h2>Khởi tạo dữ liệu mới?</h2><p style="color:#6b7280;margin:12px 0;">Chưa có dữ liệu trước đó cho tài khoản này. <strong>Chỉ bấm tiếp nếu đây là shop mới</strong>.</p><button type="button" id="btn-confirm-demo-seed" style="padding:12px 24px;background:var(--primary-blue);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;margin-right:8px;">Tạo dữ liệu mẫu</button><button type="button" id="btn-retry-load" style="padding:12px 24px;background:#e5e7eb;color:#111;border:none;border-radius:8px;cursor:pointer;font-weight:600;">Thử tải lại</button></div>';
             window.app = this;
             const self = this;
-            const runSeed = async function() {
+            const runSeed = async function () {
                 if (typeof haShowConfirmModal !== 'function') return;
                 haShowConfirmModal({
                     title: 'Tạo dữ liệu mẫu?',
@@ -1043,13 +1057,13 @@ class HamobileBanhang {
                             window.app = self;
                         }
                     },
-                    onCancel: function () {},
+                    onCancel: function () { },
                 });
             };
             const btnSeed = document.getElementById('btn-confirm-demo-seed');
             const btnRetry = document.getElementById('btn-retry-load');
-            if (btnSeed) btnSeed.onclick = function() { runSeed(); };
-            if (btnRetry) btnRetry.onclick = function() { self.initAsync(); };
+            if (btnSeed) btnSeed.onclick = function () { runSeed(); };
+            if (btnRetry) btnRetry.onclick = function () { self.initAsync(); };
             return;
         } else {
             if (content && typeof haShowFullscreenFromLastError === 'function') {
@@ -1066,6 +1080,10 @@ class HamobileBanhang {
         this._ready = true;
         this.clearOldDataIfNeeded();
         this.init();
+        /* Kiểm tra quyền ổ phụ sau khi app sẵn sàng */
+        if (window.HaSecondaryBackup) {
+            setTimeout(function () { window.HaSecondaryBackup.requestPermissionIfNeeded(); }, 2000);
+        }
     }
 
     continueWithLoadedDemoCloudData() {
@@ -1132,7 +1150,7 @@ class HamobileBanhang {
         window.FirebaseStorage.setConfig(cfg.url, originalKey);
         return null;
     }
-    
+
     initializeData() {
         this.demoData = window.FirebaseStorage.getData() || this.demoData;
         const hostedProxy = window.FirebaseStorage.usesCloudProxyApi();
@@ -1164,7 +1182,7 @@ class HamobileBanhang {
 
     migrateProductData() {
         let needsSave = false;
-        
+
         // Đảm bảo có debtPayments (lịch sử thu công nợ) - bắt buộc lưu lên Firebase
         if (!this.demoData.debtPayments) {
             this.demoData.debtPayments = [];
@@ -1260,7 +1278,7 @@ class HamobileBanhang {
         // Sửa trùng ID sản phẩm + đổi mã SP_DUP* thành mã chuẩn SPxxx
         if (this.demoData.products && this.demoData.products.length > 0) {
             // Tìm số SP lớn nhất đang dùng
-            const getSpNum = id => { const m = (id||'').match(/^SP(\d+)$/i); return m ? parseInt(m[1], 10) : 0; };
+            const getSpNum = id => { const m = (id || '').match(/^SP(\d+)$/i); return m ? parseInt(m[1], 10) : 0; };
             let nextSpNum = Math.max(0, ...this.demoData.products.map(p => getSpNum(p.id)));
 
             // Bước 1: đổi tên SP_DUP* còn tồn tại thành mã SPxxx kế tiếp
@@ -1313,7 +1331,7 @@ class HamobileBanhang {
                 }
             });
         }
-        
+
         if (needsSave) {
             this.saveToFirebaseImmediate().then(ok => {
                 if (!ok) this.saveToLocalStorage();
@@ -1334,15 +1352,15 @@ class HamobileBanhang {
             if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('ha_onboarding_hint') === '1') return;
             if (typeof sessionStorage !== 'undefined') sessionStorage.setItem('ha_onboarding_hint', '1');
             var self = this;
-            window.setTimeout(function() {
+            window.setTimeout(function () {
                 self.showNotification(
                     'Chào mừng — dữ liệu shop có thể mới hoặc chưa lưu lần đầu lên đám mây. Thêm sản phẩm và bán thử; mọi thay đổi sẽ đồng bộ khi bạn lưu.',
                     'info',
                 );
             }, 700);
-        } catch (_) {}
+        } catch (_) { }
     }
-    
+
     init() {
         this.maybeShowCloudOnboardingHint();
         this.setupNavigation();
@@ -1404,7 +1422,7 @@ class HamobileBanhang {
                 const p = new URLSearchParams(window.location.search || '');
                 if (p.get('shop')) return;
             }
-        } catch (_) {}
+        } catch (_) { }
         try {
             const k = '__ha_storage_probe__';
             sessionStorage.setItem(k, '1');
@@ -1420,9 +1438,9 @@ class HamobileBanhang {
                 if (!persisted && typeof navigator.storage.persist === 'function') {
                     try {
                         persisted = await navigator.storage.persist();
-                    } catch (_) {}
+                    } catch (_) { }
                 }
-            } catch (_) {}
+            } catch (_) { }
         }
     }
     showIncognitoWarning() {
@@ -1437,7 +1455,7 @@ class HamobileBanhang {
     }
     hideIncognitoWarning() {
         if (this._beforeUnloadAdded && this._beforeUnloadHandler) {
-            try { window.removeEventListener('beforeunload', this._beforeUnloadHandler); } catch (_) {}
+            try { window.removeEventListener('beforeunload', this._beforeUnloadHandler); } catch (_) { }
             this._beforeUnloadAdded = false;
             this._beforeUnloadHandler = null;
         }
@@ -1447,7 +1465,7 @@ class HamobileBanhang {
             document.body.style.paddingTop = '';
         }
     }
-    
+
     generateDemoData() {
         return {
             customers: [
@@ -1501,11 +1519,11 @@ class HamobileBanhang {
 
         return [
             // Đơn hàng từ khách hàng doanh nghiệp - để test hiển thị
-            { 
-                id: 'DH007', 
-                customerId: 'KH003', 
+            {
+                id: 'DH007',
+                customerId: 'KH003',
                 customerName: 'Vũ Đức Nam',
-                date: todayStr, 
+                date: todayStr,
                 time: '17:30',
                 products: [
                     { id: 'SP003', name: 'MacBook Air M2', quantity: 2, price: 28900000 }
@@ -1516,11 +1534,11 @@ class HamobileBanhang {
                 paymentStatus: 'Công nợ'
             },
             // Đơn hàng mới nhất trước (hôm nay)
-            { 
-                id: 'DH006', 
-                customerId: 'KH001', 
+            {
+                id: 'DH006',
+                customerId: 'KH001',
                 customerName: 'Đặng Thanh Hùng',
-                date: todayStr, 
+                date: todayStr,
                 time: '16:45',
                 products: [
                     { id: 'SP001', name: 'iPhone 15 Pro', quantity: 1, price: 28900000 }
@@ -1530,11 +1548,11 @@ class HamobileBanhang {
                 paymentMethod: 'Chuyển khoản',
                 paymentStatus: 'Công nợ'
             },
-            { 
-                id: 'DH002', 
-                customerId: 'KH002', 
+            {
+                id: 'DH002',
+                customerId: 'KH002',
                 customerName: 'Bùi Thị Mai',
-                date: todayStr, 
+                date: todayStr,
                 time: '14:15',
                 products: [
                     { id: 'SP002', name: 'Samsung Galaxy S24', quantity: 1, price: 24900000 }
@@ -1544,11 +1562,11 @@ class HamobileBanhang {
                 paymentMethod: 'Tiền mặt',
                 paymentStatus: 'Công nợ'
             },
-            { 
-                id: 'DH001', 
-                customerId: 'KH001', 
+            {
+                id: 'DH001',
+                customerId: 'KH001',
                 customerName: 'Đặng Thanh Hùng',
-                date: todayStr, 
+                date: todayStr,
                 time: '10:30',
                 products: [
                     { id: 'SP001', name: 'iPhone 15 Pro', quantity: 1, price: 28900000 },
@@ -1559,11 +1577,11 @@ class HamobileBanhang {
                 paymentMethod: 'Chuyển khoản',
                 paymentStatus: 'Đã thanh toán'
             },
-            { 
-                id: 'DH003', 
-                customerId: 'KH003', 
+            {
+                id: 'DH003',
+                customerId: 'KH003',
                 customerName: 'Vũ Đức Nam',
-                date: yesterdayStr, 
+                date: yesterdayStr,
                 time: '16:45',
                 products: [
                     { id: 'SP003', name: 'MacBook Air M2', quantity: 1, price: 28900000 },
@@ -1574,11 +1592,11 @@ class HamobileBanhang {
                 paymentMethod: 'Chuyển khoản',
                 paymentStatus: 'Đã thanh toán'
             },
-            { 
-                id: 'DH004', 
-                customerId: 'KH004', 
+            {
+                id: 'DH004',
+                customerId: 'KH004',
                 customerName: 'Ngô Minh Tuấn',
-                date: twoDaysAgoStr, 
+                date: twoDaysAgoStr,
                 time: '09:20',
                 products: [
                     { id: 'SP006', name: 'Quả bóng đá FIFA', quantity: 2, price: 500000 }
@@ -1588,11 +1606,11 @@ class HamobileBanhang {
                 paymentMethod: 'Tiền mặt',
                 paymentStatus: 'Công nợ'
             },
-            { 
-                id: 'DH005', 
-                customerId: 'KH005', 
+            {
+                id: 'DH005',
+                customerId: 'KH005',
                 customerName: 'Đinh Thị Lan',
-                date: threeDaysAgoStr, 
+                date: threeDaysAgoStr,
                 time: '11:30',
                 products: [
                     { id: 'SP007', name: 'Vợt Pickle Ball Pro', quantity: 1, price: 800000 },
@@ -1880,7 +1898,7 @@ class HamobileBanhang {
         if (!el || !mc || !mc.classList.contains('page-dashboard')) return;
         el.outerHTML = this.getTrendAnalysisSectionHtml();
     }
-    
+
     // Tính toán khoảng thời gian từ thời điểm hiện tại
     getTimeAgo(pastTime) {
         if (!pastTime || !(pastTime instanceof Date) || isNaN(pastTime.getTime())) return '—';
@@ -1889,14 +1907,14 @@ class HamobileBanhang {
         const minutes = Math.floor(diff / (1000 * 60));
         const hours = Math.floor(minutes / 60);
         const days = Math.floor(hours / 24);
-        
+
         if (minutes < 1) return "Vừa xong";
         if (minutes < 60) return `${minutes} phút trước`;
         if (hours < 24) return `${hours} giờ trước`;
         if (days < 30) return `${days} ngày trước`;
         return pastTime.toLocaleDateString('vi-VN');
     }
-    
+
     // Tạo thời gian hoạt động thực tế
     generateRealisticActivityTimes() {
         const now = this.getVietnamTime();
@@ -1908,14 +1926,14 @@ class HamobileBanhang {
             new Date(now.getTime() - 3 * 60 * 60 * 1000), // 3 giờ trước
         ];
     }
-    
+
     // Format hiển thị thời gian Việt Nam đẹp
     formatVietnameseTime(date = null) {
         const targetDate = date || this.getVietnamTime();
-        return targetDate.toLocaleString('vi-VN', { 
+        return targetDate.toLocaleString('vi-VN', {
             timeZone: 'Asia/Ho_Chi_Minh',
             year: 'numeric',
-            month: '2-digit', 
+            month: '2-digit',
             day: '2-digit',
             hour: '2-digit',
             minute: '2-digit',
@@ -2031,7 +2049,7 @@ class HamobileBanhang {
             }
         });
     }
-    
+
     setupEventListeners() {
         document.addEventListener('click', (e) => {
             const actionButton = e.target.closest('.action-button');
@@ -2073,12 +2091,12 @@ class HamobileBanhang {
             }
         });
     }
-    
+
     setActiveNav(activeItem) {
         document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
         activeItem.classList.add('active');
     }
-    
+
     loadPage(pageName) {
         this.currentPage = pageName;
         this.initializeData();
@@ -2106,7 +2124,7 @@ class HamobileBanhang {
                 if (!ok) this.saveToLocalStorage();
             });
         }
-        
+
         let content;
         try {
             content = this.getPageContent(pageName);
@@ -2115,7 +2133,7 @@ class HamobileBanhang {
             content = `<div class="fade-in" style="padding: 24px; color: #dc2626;"><h3>⚠️ Lỗi tải trang</h3><p>${escapeHtml(err && err.message ? err.message : 'Vui lòng thử lại hoặc tải lại trang.')}</p></div>`;
         }
         const titles = this.getPageTitles(pageName);
-        
+
         document.getElementById('page-title').textContent = titles.title;
         document.getElementById('page-subtitle').textContent = titles.subtitle;
         const mainEl = document.getElementById('main-content');
@@ -2180,12 +2198,12 @@ class HamobileBanhang {
                 setTimeout(_renderTrend, 0);
             }
         }
-        
+
         // Add fade in animation
         document.getElementById('main-content').classList.add('fade-in');
         setTimeout(() => {
             document.getElementById('main-content').classList.remove('fade-in');
-            
+
             // Restore logo/QR for company-info page
             if (pageName === 'company-info') {
                 this.restoreLogoAndQR();
@@ -2196,14 +2214,14 @@ class HamobileBanhang {
                 try {
                     this.updatePOSDiscountHint();
                     this.updatePOSDebtHint();
-                } catch (_) {}
+                } catch (_) { }
             }
             if (pageName === 'dashboard' && this._dashboardSidebarLayoutHandler) {
                 this._dashboardSidebarLayoutHandler();
             }
             // FAB mobile removed; no DOM reparenting needed.
         }, 500);
-        }
+    }
 
     _tearDownVirtualScrollGrids() {
         ['_vsgProductsTable', '_vsgProductsMobile', '_vsgInventoryDesktop', '_vsgInventoryMobile'].forEach((k) => {
@@ -2211,7 +2229,7 @@ class HamobileBanhang {
             if (v && typeof v.destroy === 'function') {
                 try {
                     v.destroy();
-                } catch (_) {}
+                } catch (_) { }
             }
             this[k] = null;
         });
@@ -2221,7 +2239,7 @@ class HamobileBanhang {
     ensureProductsFabMobile() {
         return;
     }
-    
+
     getPageTitles(pageName) {
         const titles = {
             dashboard: { title: 'Tổng quan', subtitle: 'Hệ thống quản lý bán hàng' },
@@ -2242,9 +2260,9 @@ class HamobileBanhang {
         };
         return titles[pageName] || { title: 'Hệ thống', subtitle: 'Quản lý bán hàng' };
     }
-    
+
     getPageContent(pageName) {
-        switch(pageName) {
+        switch (pageName) {
             case 'customers':
                 return this.getCustomersContent();
             case 'suppliers':
@@ -2278,7 +2296,7 @@ class HamobileBanhang {
                 return this.getDashboardContent();
         }
     }
-    
+
     getDashboardContent() {
         const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
         const data = this.demoData || {};
@@ -2398,7 +2416,7 @@ class HamobileBanhang {
             </div>
         `;
     }
-    
+
     getCustomersContent() {
         if (this.customersSearchQuery === undefined) this.customersSearchQuery = '';
         if (this.customersSearchVisible === undefined) this.customersSearchVisible = true;
@@ -2456,7 +2474,7 @@ class HamobileBanhang {
             </div>
         `;
     }
-    
+
     getSuppliersContent() {
         if (!this.selectedSupplierIds) this.selectedSupplierIds = new Set();
         if (this.suppliersSearchQuery === undefined) this.suppliersSearchQuery = '';
@@ -2596,7 +2614,7 @@ class HamobileBanhang {
             `;
         }).join('');
     }
-    
+
     getProductsContent() {
         if (!this.selectedProductIds) this.selectedProductIds = new Set();
         if (this.productsSearchQuery === undefined) this.productsSearchQuery = '';
@@ -2645,10 +2663,10 @@ class HamobileBanhang {
                             <span class="stat-icon">⚠️</span>
                         </div>
                         <div class="stat-value">${this.demoData.products.filter(p => {
-                            const min = (p.hasImei && p.imeis) ? 0 : (p.minStock ?? 1);
-                            const stock = (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
-                            return min > 0 && stock <= min;
-                        }).length}</div>
+            const min = (p.hasImei && p.imeis) ? 0 : (p.minStock ?? 1);
+            const stock = (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
+            return min > 0 && stock <= min;
+        }).length}</div>
                         <div class="stat-change negative">Cần nhập thêm</div>
                     </div>
                 </div>
@@ -2836,16 +2854,16 @@ class HamobileBanhang {
                     stockStatus === 'out' || stockStatus === 'low'
                         ? '#ef4444'
                         : stockStatus === 'warning'
-                          ? '#f59e0b'
-                          : '#10b981';
+                            ? '#f59e0b'
+                            : '#10b981';
                 const statusText =
                     stockStatus === 'out'
                         ? 'Hết hàng'
                         : stockStatus === 'low'
-                          ? 'Sắp hết'
-                          : stockStatus === 'warning'
-                            ? 'Ít hàng'
-                            : 'Đủ hàng';
+                            ? 'Sắp hết'
+                            : stockStatus === 'warning'
+                                ? 'Ít hàng'
+                                : 'Đủ hàng';
                 const statusIcon =
                     stockStatus === 'out' ? '🚫' : stockStatus === 'low' ? '⚠️' : stockStatus === 'warning' ? '⚡' : '✅';
                 return `
@@ -2893,8 +2911,8 @@ class HamobileBanhang {
                     stockStatus === 'out' || stockStatus === 'low'
                         ? '#ef4444'
                         : stockStatus === 'warning'
-                          ? '#f59e0b'
-                          : '#10b981';
+                            ? '#f59e0b'
+                            : '#10b981';
                 const safeId = String(product.id || '')
                     .replace(/"/g, '&quot;')
                     .replace(/'/g, '&#39;');
@@ -2981,11 +2999,11 @@ class HamobileBanhang {
 
     removeAccents(str) {
         if (!str) return '';
-        return String(str).replace(/đ/g,'d').replace(/Đ/g,'D').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+        return String(str).replace(/đ/g, 'd').replace(/Đ/g, 'D').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     }
     searchMatch(text, query) {
         if (!query || !String(query).trim()) return true;
-        const t = this.removeAccents((text||'').toLowerCase());
+        const t = this.removeAccents((text || '').toLowerCase());
         const q = this.removeAccents(String(query).trim().toLowerCase());
         return t.includes(q);
     }
@@ -3182,7 +3200,7 @@ class HamobileBanhang {
     // - Từ khóa >= 4 ký tự: cho phép khớp chuỗi con để "THUO" tìm được "THƯỜNG"
     searchMatchWordBoundary(text, query) {
         if (!query || !String(query).trim()) return true;
-        const t = this.removeAccents((text||'').toLowerCase());
+        const t = this.removeAccents((text || '').toLowerCase());
         const q = this.removeAccents(String(query).trim().toLowerCase());
         const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const reFull = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[^a-z0-9]|$)', 'i');
@@ -3195,7 +3213,7 @@ class HamobileBanhang {
         return false;
     }
     formatPrice(num) { return (num || 0).toLocaleString('vi-VN'); }
-    parsePrice(str) { const n = parseInt(String(str||'').replace(/\D/g,''), 10); return isNaN(n) ? 0 : Math.max(0, n); }
+    parsePrice(str) { const n = parseInt(String(str || '').replace(/\D/g, ''), 10); return isNaN(n) ? 0 : Math.max(0, n); }
     priceInputFocus(el) { el.value = String(this.parsePrice(el.value)); }
     posCartPriceFocus(el) {
         const idx = el.getAttribute('data-pos-price-idx');
@@ -3217,7 +3235,7 @@ class HamobileBanhang {
             this.refreshPOSUI();
         }
     }
-    priceInputInput(el) { let s = (el.value||'').replace(/\D/g,''); s = s.replace(/^0+(?=\d)/,''); el.value = s; }
+    priceInputInput(el) { let s = (el.value || '').replace(/\D/g, ''); s = s.replace(/^0+(?=\d)/, ''); el.value = s; }
     priceInputBlur(el) {
         const n = this.parsePrice(el.value);
         el.value = this.formatPrice(n);
@@ -3290,13 +3308,13 @@ class HamobileBanhang {
         if (this._vsgProductsTable) {
             try {
                 this._vsgProductsTable.destroy();
-            } catch (_) {}
+            } catch (_) { }
             this._vsgProductsTable = null;
         }
         if (this._vsgProductsMobile) {
             try {
                 this._vsgProductsMobile.destroy();
-            } catch (_) {}
+            } catch (_) { }
             this._vsgProductsMobile = null;
         }
         if (footer) {
@@ -3609,7 +3627,7 @@ class HamobileBanhang {
         this.loadPage('products');
         this.showNotification(`Đã đổi nhóm hàng cho ${count} sản phẩm thành "${newCategory}".`, 'success');
     }
-    
+
     getInventoryContent() {
         const totalValue = this.demoData.products.reduce(
             (sum, p) => sum + this.getInventoryProductStock(p) * (p.importPrice || 0),
@@ -3643,9 +3661,9 @@ class HamobileBanhang {
                     </summary>
                     <div class="inventory-low-stock-grid">
                         ${lowStockProducts.map(p => {
-                            const stock = (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
-                            const min = (p.hasImei && p.imeis) ? 0 : (p.minStock ?? 1);
-                            return `
+            const stock = (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
+            const min = (p.hasImei && p.imeis) ? 0 : (p.minStock ?? 1);
+            return `
                             <div class="inventory-low-stock-card">
                                 <div class="inventory-low-stock-name">${escapeHtml(p.name)}</div>
                                 <div class="inventory-low-stock-info">Tồn: ${stock} / Tối thiểu: ${min}</div>
@@ -3669,7 +3687,7 @@ class HamobileBanhang {
                     </summary>
                     <div class="inventory-out-of-stock-grid">
                         ${outOfStockProducts.map(p => {
-                            return `
+                return `
                             <div class="inventory-out-of-stock-card">
                                 <div class="inventory-out-of-stock-name">${escapeHtml(p.name)}</div>
                                 <div class="inventory-out-of-stock-info">Tồn: 0 | Cần nhập thêm</div>
@@ -3764,7 +3782,7 @@ class HamobileBanhang {
             </div>
         `;
     }
-    
+
     getSalesContent() {
         const now = this.getVietnamTime();
         const dateStr = now.toLocaleDateString('vi-VN');
@@ -3776,7 +3794,7 @@ class HamobileBanhang {
         const customerOptions = `<div onclick="app.selectPOSCustomer('KH_LE','Khách lẻ')" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-weight: 600; color: #059669;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">Khách lẻ</div>` + realCustomers.map(c => {
             const debt = this.getActualDebtForCustomer(c);
             const debtText = debt > 0 ? ` • Nợ: ${debt.toLocaleString('vi-VN')}` : '';
-            return `<div onclick="app.selectPOSCustomer('${c.id}','${(c.name||'').replace(/'/g,"\\'")}')" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">${(c.name||'').replace(/</g,'&lt;')}${debtText}</div>`;
+            return `<div onclick="app.selectPOSCustomer('${c.id}','${(c.name || '').replace(/'/g, "\\'")}')" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">${(c.name || '').replace(/</g, '&lt;')}${debtText}</div>`;
         }).join('');
         const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
         const mobileStep = this.posMobileStep || 1;
@@ -3832,7 +3850,7 @@ class HamobileBanhang {
                 </div>
                 <div class="pos-mobile-footer pos-mobile-footer-fixed pos-mobile-step2-footer" style="flex-shrink: 0; padding: 12px 16px; padding-bottom: max(12px, env(safe-area-inset-bottom)); background: #f8fafc; border-top: 1px solid #e5e7eb;">
                     <div style="display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 10px; font-size: 14px;">
-                        <span>Tổng tiền hàng <span id="pos-mobile-count">${(this.posCart.items||[]).reduce((n,i)=>n+(i.quantity||1),0)}</span></span>
+                        <span>Tổng tiền hàng <span id="pos-mobile-count">${(this.posCart.items || []).reduce((n, i) => n + (i.quantity || 1), 0)}</span></span>
                         <span id="pos-mobile-total" style="font-weight: 700; font-size: 18px; color: #059669; flex-shrink: 0;">${summary.toPay.toLocaleString('vi-VN')}</span>
                     </div>
                     <div class="pos-mobile-step2-checkout" style="font-size: 13px; border-top: 1px solid #e5e7eb; padding-top: 10px; margin-bottom: 10px;">
@@ -3844,10 +3862,10 @@ class HamobileBanhang {
                             <div style="font-size: 12px; color: #6b7280; margin-bottom: 6px; font-weight: 500;">Giảm giá (VNĐ / %)</div>
                             <div style="display: flex; gap: 8px; align-items: center;">
                                 <select id="pos-discount-type" onchange="app.updatePOSDiscountType(this.value)" style="box-sizing: border-box; min-width: 108px; width: 108px; flex-shrink: 0; padding: 8px 30px 8px 12px; border: 2px solid #e5e7eb; border-radius: 8px; font-size: 13px;">
-                                    <option value="vnd" ${(this.posCart.discountType||'vnd')==='vnd'?'selected':''}>VNĐ</option>
-                                    <option value="percent" ${(this.posCart.discountType||'vnd')==='percent'?'selected':''}>%</option>
+                                    <option value="vnd" ${(this.posCart.discountType || 'vnd') === 'vnd' ? 'selected' : ''}>VNĐ</option>
+                                    <option value="percent" ${(this.posCart.discountType || 'vnd') === 'percent' ? 'selected' : ''}>%</option>
                                 </select>
-                                <input type="text" id="pos-discount-input" inputmode="numeric" value="${this.posCart.discountType==='percent' && summary.totalGoods>0 ? Math.round(((this.posCart.discount||0)/summary.totalGoods)*100) : this.formatPrice(this.posCart.discount||0)}"
+                                <input type="text" id="pos-discount-input" inputmode="numeric" value="${this.posCart.discountType === 'percent' && summary.totalGoods > 0 ? Math.round(((this.posCart.discount || 0) / summary.totalGoods) * 100) : this.formatPrice(this.posCart.discount || 0)}"
                                        onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this); app.updatePOSDiscount(this.value)"
                                        onblur="app.priceInputBlur(this)"
                                        style="flex: 1; min-width: 0; padding: 8px 10px; border: 2px solid #e5e7eb; border-radius: 8px; text-align: right; font-weight: 600; font-size: 14px;">
@@ -3874,7 +3892,7 @@ class HamobileBanhang {
             </div>
             `;
         }
-        
+
         return `
             <div class="fade-in pos-kiotviet" style="margin: 0; padding: 0; max-width: none;">
                 <div class="pos-header" style="background: var(--header-gradient); color: white; padding: 16px 24px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
@@ -3934,10 +3952,10 @@ class HamobileBanhang {
                                 <div style="margin-bottom: 6px; font-weight: 500;">Giảm giá (VNĐ / %)</div>
                                 <div style="display: flex; gap: 8px; align-items: center;">
                                     <select id="pos-discount-type" onchange="app.updatePOSDiscountType(this.value)" style="box-sizing: border-box; min-width: 104px; width: 104px; padding: 8px 28px 8px 10px; border: 2px solid #e5e7eb; border-radius: 6px; font-size: 12px;">
-                                        <option value="vnd" ${(this.posCart.discountType||'vnd')==='vnd'?'selected':''}>VNĐ</option>
-                                        <option value="percent" ${(this.posCart.discountType||'vnd')==='percent'?'selected':''}>%</option>
+                                        <option value="vnd" ${(this.posCart.discountType || 'vnd') === 'vnd' ? 'selected' : ''}>VNĐ</option>
+                                        <option value="percent" ${(this.posCart.discountType || 'vnd') === 'percent' ? 'selected' : ''}>%</option>
                                     </select>
-                                    <input type="text" id="pos-discount-input" inputmode="numeric" value="${this.posCart.discountType==='percent' && summary.totalGoods>0 ? Math.round(((this.posCart.discount||0)/summary.totalGoods)*100) : this.formatPrice(this.posCart.discount||0)}" 
+                                    <input type="text" id="pos-discount-input" inputmode="numeric" value="${this.posCart.discountType === 'percent' && summary.totalGoods > 0 ? Math.round(((this.posCart.discount || 0) / summary.totalGoods) * 100) : this.formatPrice(this.posCart.discount || 0)}" 
                                            onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this); app.updatePOSDiscount(this.value)" 
                                            onblur="app.priceInputBlur(this)"
                                            style="flex: 1; min-width: 90px; padding: 6px 8px; border: 2px solid #e5e7eb; border-radius: 6px; text-align: right; font-weight: 600; font-size: 13px;">
@@ -3974,7 +3992,7 @@ class HamobileBanhang {
             </div>
         `;
     }
-    
+
     renderPOSCart(enableMobileDetailClick) {
         const items = this.posCart.items || [];
         const isMobileStep2 = enableMobileDetailClick || (typeof window !== 'undefined' && window.innerWidth <= 768 && this.posMobileStep === 2);
@@ -3989,39 +4007,39 @@ class HamobileBanhang {
             const origPrice = item.originalPrice != null ? item.originalPrice : (p ? (p.price || 0) : (item.price || 0));
             const currPrice = item.price || 0;
             const priceEdited = origPrice > 0 && currPrice !== origPrice;
-            const rawTotal = (item.quantity||1)*currPrice;
+            const rawTotal = (item.quantity || 1) * currPrice;
             const itemDisc = Math.max(0, parseInt(item.discount, 10) || 0);
             const itemTotal = Math.max(0, rawTotal - Math.min(itemDisc, rawTotal));
             const dt = item.discountType || 'vnd';
-            const rawRow = (item.quantity||1)*currPrice;
-            const discVal = dt === 'percent' && rawRow > 0 ? (Math.round((itemDisc/rawRow)*100) || 0) : (itemDisc || 0);
-            const priceDisplayMobile = priceEdited ? `<div class="pos-cart-mobile-price-display"><span class="pos-cart-original-price">${(origPrice||0).toLocaleString('vi-VN')}</span> <span class="pos-cart-sale-price">${(currPrice||0).toLocaleString('vi-VN')}</span></div>` : '';
+            const rawRow = (item.quantity || 1) * currPrice;
+            const discVal = dt === 'percent' && rawRow > 0 ? (Math.round((itemDisc / rawRow) * 100) || 0) : (itemDisc || 0);
+            const priceDisplayMobile = priceEdited ? `<div class="pos-cart-mobile-price-display"><span class="pos-cart-original-price">${(origPrice || 0).toLocaleString('vi-VN')}</span> <span class="pos-cart-sale-price">${(currPrice || 0).toLocaleString('vi-VN')}</span></div>` : '';
             return `
             <div class="pos-cart-row" data-idx="${i}">
                 <div class="pos-cart-row-desktop">
-                    <span class="pos-cart-tt">${i+1}</span>
+                    <span class="pos-cart-tt">${i + 1}</span>
                     <button type="button" onclick="app.removeFromPOS(${i})" class="pos-cart-del" title="Xóa">🗑️</button>
-                    <div class="pos-cart-name">${(item.name||'').replace(/</g,'&lt;')}${imeiCartLine}</div>
+                    <div class="pos-cart-name">${(item.name || '').replace(/</g, '&lt;')}${imeiCartLine}</div>
                     <input type="number" min="1" value="${item.quantity}" onchange="app.updatePOSQty(${i}, this.value)" class="pos-cart-qty">
-                    <input type="text" class="price-input pos-cart-price" value="${this.formatPrice(item.price||0)}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this); app.updatePOSItemPrice(${i}, this.value)" onblur="app.priceInputBlur(this); app.updatePOSItemPrice(${i}, this.value)" data-pos-price-idx="${i}" inputmode="numeric" placeholder="0" title="Đơn giá">
+                    <input type="text" class="price-input pos-cart-price" value="${this.formatPrice(item.price || 0)}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this); app.updatePOSItemPrice(${i}, this.value)" onblur="app.priceInputBlur(this); app.updatePOSItemPrice(${i}, this.value)" data-pos-price-idx="${i}" inputmode="numeric" placeholder="0" title="Đơn giá">
                     <div class="pos-cart-discount-wrap">
                         <select onchange="app.updatePOSItemDiscountType(${i}, this.value)">
-                            <option value="vnd" ${dt==='vnd'?'selected':''}>VNĐ</option>
-                            <option value="percent" ${dt==='percent'?'selected':''}>%</option>
+                            <option value="vnd" ${dt === 'vnd' ? 'selected' : ''}>VNĐ</option>
+                            <option value="percent" ${dt === 'percent' ? 'selected' : ''}>%</option>
                         </select>
-                        <input type="text" class="price-input" value="${dt==='percent' ? discVal : this.formatPrice(discVal)}" onfocus="app.priceInputFocus(this)" oninput="app.updatePOSItemDiscount(${i}, this.value)" onblur="app.priceInputBlur(this)" data-pos-discount-idx="${i}" inputmode="numeric" placeholder="0">
+                        <input type="text" class="price-input" value="${dt === 'percent' ? discVal : this.formatPrice(discVal)}" onfocus="app.priceInputFocus(this)" oninput="app.updatePOSItemDiscount(${i}, this.value)" onblur="app.priceInputBlur(this)" data-pos-discount-idx="${i}" inputmode="numeric" placeholder="0">
                     </div>
                     <div id="pos-item-total-${i}" class="pos-cart-total">${itemTotal.toLocaleString('vi-VN')}</div>
                 </div>
                 <div class="pos-cart-row-mobile">
                     <div class="pos-cart-mobile-top">
-                        <div class="pos-cart-mobile-name" ${isMobileStep2 ? `onclick="app.showPOSProductDetailModal(${i})" style="cursor: pointer;"` : ''}>${(item.name||'').replace(/</g,'&lt;')}${imeiCartLine}</div>
+                        <div class="pos-cart-mobile-name" ${isMobileStep2 ? `onclick="app.showPOSProductDetailModal(${i})" style="cursor: pointer;"` : ''}>${(item.name || '').replace(/</g, '&lt;')}${imeiCartLine}</div>
                         ${priceDisplayMobile}
                     </div>
                     <div class="pos-cart-mobile-bottom">
                         <div class="pos-cart-mobile-stepper">
                             <button type="button" onclick="app.updatePOSQtyDelta(${i}, -1)">−</button>
-                            <span>${item.quantity||1}</span>
+                            <span>${item.quantity || 1}</span>
                             <button type="button" onclick="app.updatePOSQtyDelta(${i}, 1)">+</button>
                         </div>
                         <input type="text" class="price-input pos-cart-mobile-price" value="${this.formatPrice(currPrice)}" onfocus="app.posCartPriceFocus(this)" oninput="app.priceInputInput(this); app.updatePOSItemPrice(${i}, this.value)" onblur="app.posCartPriceBlur(this)" data-pos-price-idx="${i}" inputmode="numeric" placeholder="Nhập giá" title="Nhấn để sửa giá">
@@ -4031,7 +4049,7 @@ class HamobileBanhang {
             </div>
         `}).join('');
     }
-    
+
     getPOSSummary() {
         const items = this.posCart.items || [];
         const totalGoods = items.reduce((s, i) => {
@@ -4044,7 +4062,7 @@ class HamobileBanhang {
         const toPay = Math.max(0, totalGoods - discount);
         return { totalGoods, discount, toPay };
     }
-    
+
     updatePOSDiscountType(type) {
         this.posCart.discountType = type;
         const inp = document.getElementById('pos-discount-input');
@@ -4055,7 +4073,7 @@ class HamobileBanhang {
         }
         this.updatePOSDiscountHint();
     }
-    
+
     updatePOSDiscount(val) {
         const dt = this.posCart.discountType || 'vnd';
         const s = this.getPOSSummary();
@@ -4076,7 +4094,7 @@ class HamobileBanhang {
         this.updatePOSDiscountHint();
         this.updatePOSDebtHint();
     }
-    
+
     updatePOSDiscountHint() {
         const hint = document.getElementById('pos-discount-hint');
         if (!hint) return;
@@ -4086,12 +4104,12 @@ class HamobileBanhang {
         const pct = s.totalGoods > 0 ? Math.round((d / s.totalGoods) * 100) : 0;
         hint.textContent = `${d.toLocaleString('vi-VN')} VNĐ (${pct}%)`;
     }
-    
+
     updatePOSAmountPaid(val) {
         this.posCart.amountPaid = Math.max(0, this.parsePrice(val));
         this.updatePOSDebtHint();
     }
-    
+
     updatePOSDebtHint() {
         const s = this.getPOSSummary();
         const paid = this.posCart.amountPaid != null ? this.posCart.amountPaid : s.toPay;
@@ -4107,7 +4125,7 @@ class HamobileBanhang {
             }
         }
     }
-    
+
     updatePOSItemPrice(index, val) {
         const item = this.posCart.items[index];
         if (!item) return;
@@ -4138,7 +4156,7 @@ class HamobileBanhang {
         item.discountType = type;
         this.refreshPOSUI();
     }
-    
+
     updatePOSItemDiscount(index, val) {
         const item = this.posCart.items[index];
         if (!item) return;
@@ -4166,7 +4184,7 @@ class HamobileBanhang {
         if (amountPaidInp) amountPaidInp.value = this.formatPrice(s.toPay);
         this.updatePOSDebtHint();
     }
-    
+
     addProductToPOS(productId) {
         const p = (this.demoData.products || []).find(x => x.id === productId);
         if (!p) return;
@@ -4189,7 +4207,7 @@ class HamobileBanhang {
             this.refreshPOSUI();
         }
     }
-    
+
     removeFromPOS(index) {
         this.posCart.items.splice(index, 1);
         const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
@@ -4200,7 +4218,7 @@ class HamobileBanhang {
             this.refreshPOSUI();
         }
     }
-    
+
     updatePOSQtyDelta(index, delta) {
         const item = this.posCart.items[index];
         if (!item) return;
@@ -4218,7 +4236,7 @@ class HamobileBanhang {
         item.quantity = qty;
         this.refreshPOSUI();
     }
-    
+
     decreasePOSProduct(productId) {
         const idx = this.posCart.items.findIndex(x => x.productId === productId);
         if (idx < 0) return;
@@ -4241,7 +4259,7 @@ class HamobileBanhang {
         if (totalEl) totalEl.textContent = s.totalGoods.toLocaleString('vi-VN');
         if (discountInp) {
             const dt = this.posCart.discountType || 'vnd';
-            discountInp.value = dt === 'percent' && s.totalGoods > 0 ? Math.round(((this.posCart.discount||0)/s.totalGoods)*100) : this.formatPrice(this.posCart.discount || 0);
+            discountInp.value = dt === 'percent' && s.totalGoods > 0 ? Math.round(((this.posCart.discount || 0) / s.totalGoods) * 100) : this.formatPrice(this.posCart.discount || 0);
         }
         if (toPayEl) toPayEl.textContent = s.toPay.toLocaleString('vi-VN');
         const itemCount = (this.posCart.items || []).reduce((n, i) => n + (i.quantity || 1), 0);
@@ -4261,7 +4279,7 @@ class HamobileBanhang {
         if (custNameEl) custNameEl.textContent = custName;
         if (headerCustName) headerCustName.textContent = custName;
     }
-    
+
     syncPosSearch(val) {
         const h = document.getElementById('pos-product-search');
         const m = document.getElementById('pos-product-search-mobile');
@@ -4361,14 +4379,14 @@ class HamobileBanhang {
             try {
                 const s = this._posHtml5Scanner;
                 this._posHtml5Scanner = null;
-                await Promise.resolve().then(() => s.stop()).then(() => s.clear()).catch(() => {});
-            } catch (_) {}
+                await Promise.resolve().then(() => s.stop()).then(() => s.clear()).catch(() => { });
+            } catch (_) { }
             await this.startPOSHtml5FallbackScanner(statusEl);
             return;
         }
         try {
             if (this._posScannerStream) {
-                try { this._posScannerStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+                try { this._posScannerStream.getTracks().forEach(t => t.stop()); } catch (_) { }
                 this._posScannerStream = null;
             }
             const stream = await navigator.mediaDevices.getUserMedia({ video: this._posScannerVideoConstraints(id), audio: false });
@@ -4391,7 +4409,7 @@ class HamobileBanhang {
             if (caps.focusDistance && typeof caps.focusDistance.max === 'number') advanced.push({ focusDistance: caps.focusDistance.max });
             if (advanced.length) await track.applyConstraints({ advanced });
             if (statusEl && advanced.length) statusEl.textContent = 'Đang tối ưu lấy nét liên tục để quét mã vạch...';
-        } catch (_) {}
+        } catch (_) { }
     }
     async openPOSBarcodeScanner() {
         if (this._posScannerActive) return;
@@ -4421,7 +4439,7 @@ class HamobileBanhang {
         this._posScannerCameraIds = [];
         this._posScannerCameraIndex = 0;
         if (this._posScannerRotateTimerId) {
-            try { clearInterval(this._posScannerRotateTimerId); } catch (_) {}
+            try { clearInterval(this._posScannerRotateTimerId); } catch (_) { }
             this._posScannerRotateTimerId = null;
         }
         try {
@@ -4429,7 +4447,7 @@ class HamobileBanhang {
                 video: this._posScannerVideoConstraints(''),
                 audio: false
             });
-            try { prime.getTracks().forEach(t => t.stop()); } catch (_) {}
+            try { prime.getTracks().forEach(t => t.stop()); } catch (_) { }
             prime = null;
             const camList = await this.buildPOSRearCameraRotationList();
             this._posScannerCameraIds = camList;
@@ -4449,7 +4467,7 @@ class HamobileBanhang {
             }
             const hasNative = typeof window.BarcodeDetector !== 'undefined';
             if (!hasNative) {
-                try { stream.getTracks().forEach(t => t.stop()); } catch (_) {}
+                try { stream.getTracks().forEach(t => t.stop()); } catch (_) { }
                 this._posScannerStream = null;
                 await this.startPOSHtml5FallbackScanner(statusEl);
                 return;
@@ -4463,7 +4481,7 @@ class HamobileBanhang {
                         const code = String(results[0].rawValue || '').trim();
                         if (code) this.handlePOSScannedCode(code);
                     }
-                } catch (_) {}
+                } catch (_) { }
                 if (this._posScannerActive) window.requestAnimationFrame(scanLoop);
             };
             window.requestAnimationFrame(scanLoop);
@@ -4503,15 +4521,17 @@ class HamobileBanhang {
             const cameraSource = this._posPreferredCameraId || { facingMode: 'environment' };
             await this._posHtml5Scanner.start(
                 cameraSource,
-                { fps: 10, qrbox: { width: 220, height: 120 }, rememberLastUsedCamera: true, formatsToSupport: [
-                    window.Html5QrcodeSupportedFormats.CODE_128,
-                    window.Html5QrcodeSupportedFormats.EAN_13,
-                    window.Html5QrcodeSupportedFormats.EAN_8,
-                    window.Html5QrcodeSupportedFormats.UPC_A,
-                    window.Html5QrcodeSupportedFormats.UPC_E,
-                ] },
+                {
+                    fps: 10, qrbox: { width: 220, height: 120 }, rememberLastUsedCamera: true, formatsToSupport: [
+                        window.Html5QrcodeSupportedFormats.CODE_128,
+                        window.Html5QrcodeSupportedFormats.EAN_13,
+                        window.Html5QrcodeSupportedFormats.EAN_8,
+                        window.Html5QrcodeSupportedFormats.UPC_A,
+                        window.Html5QrcodeSupportedFormats.UPC_E,
+                    ]
+                },
                 (decodedText) => this.handlePOSScannedCode(decodedText),
-                () => {}
+                () => { }
             );
             if (statusEl) statusEl.textContent = 'Đang quét bằng chế độ tương thích...';
         } catch (_) {
@@ -4546,7 +4566,7 @@ class HamobileBanhang {
     stopPOSBarcodeScanner() {
         this._posScannerActive = false;
         if (this._posScannerRotateTimerId) {
-            try { clearInterval(this._posScannerRotateTimerId); } catch (_) {}
+            try { clearInterval(this._posScannerRotateTimerId); } catch (_) { }
             this._posScannerRotateTimerId = null;
         }
         this._posScannerCameraIds = [];
@@ -4554,10 +4574,10 @@ class HamobileBanhang {
         if (this._posHtml5Scanner) {
             const s = this._posHtml5Scanner;
             this._posHtml5Scanner = null;
-            Promise.resolve().then(() => s.stop()).then(() => s.clear()).catch(() => {});
+            Promise.resolve().then(() => s.stop()).then(() => s.clear()).catch(() => { });
         }
         if (this._posScannerStream) {
-            try { this._posScannerStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+            try { this._posScannerStream.getTracks().forEach(t => t.stop()); } catch (_) { }
             this._posScannerStream = null;
         }
         const modal = document.getElementById('pos-barcode-scan-modal');
@@ -4617,11 +4637,11 @@ class HamobileBanhang {
             const inCart = this.posCart.items.find(x => x.productId === p.id);
             const qty = inCart ? (inCart.quantity || 1) : 0;
             const stepper = canSell ? `<div class="pos-product-stepper"><button type="button" class="pos-stepper-btn" onclick="event.stopPropagation(); app.decreasePOSProduct('${p.id}')">−</button><span class="pos-stepper-qty">${qty}</span><button type="button" class="pos-stepper-btn" onclick="event.stopPropagation(); app.addProductToPOS('${p.id}')">+</button></div>` : '';
-            return `<div class="pos-product-card" data-product-id="${p.id}" onclick="${canSell && !qty ? `app.addProductToPOS('${p.id}')` : ''}" style="display: flex; align-items: center; gap: 14px; padding: 14px 16px; border: 2px solid #e5e7eb; border-radius: 10px; cursor: ${canSell ? 'pointer' : 'not-allowed'}; margin-bottom: 12px; background: ${canSell ? 'white' : '#f9fafb'}; opacity: ${canSell ? 1 : 0.6};" onmouseover="if(${canSell}) this.style.borderColor='#059669'; this.style.background='#ecfdf5';" onmouseout="if(${canSell}) this.style.borderColor='#e5e7eb'; this.style.background='white';"><div class="pos-product-thumb" style="width: 52px; height: 52px; background: linear-gradient(135deg,#e0f2fe 0%,#bae6fd 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0;">📦</div><div class="pos-product-info" style="flex: 1; min-width: 0;"><div class="pos-product-name">${(p.name||'').replace(/</g,'&lt;')}</div><div class="pos-product-meta" style="font-size:12px;color:#6b7280;">${(p.id||'').replace(/</g,'&lt;')} • Tồn: ${stock}</div>${this.buildPosImeiLineForProductList(p)}<div class="pos-product-price">${(p.price||0).toLocaleString('vi-VN')}</div></div>${stepper}</div>`;
+            return `<div class="pos-product-card" data-product-id="${p.id}" onclick="${canSell && !qty ? `app.addProductToPOS('${p.id}')` : ''}" style="display: flex; align-items: center; gap: 14px; padding: 14px 16px; border: 2px solid #e5e7eb; border-radius: 10px; cursor: ${canSell ? 'pointer' : 'not-allowed'}; margin-bottom: 12px; background: ${canSell ? 'white' : '#f9fafb'}; opacity: ${canSell ? 1 : 0.6};" onmouseover="if(${canSell}) this.style.borderColor='#059669'; this.style.background='#ecfdf5';" onmouseout="if(${canSell}) this.style.borderColor='#e5e7eb'; this.style.background='white';"><div class="pos-product-thumb" style="width: 52px; height: 52px; background: linear-gradient(135deg,#e0f2fe 0%,#bae6fd 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0;">📦</div><div class="pos-product-info" style="flex: 1; min-width: 0;"><div class="pos-product-name">${(p.name || '').replace(/</g, '&lt;')}</div><div class="pos-product-meta" style="font-size:12px;color:#6b7280;">${(p.id || '').replace(/</g, '&lt;')} • Tồn: ${stock}</div>${this.buildPosImeiLineForProductList(p)}<div class="pos-product-price">${(p.price || 0).toLocaleString('vi-VN')}</div></div>${stepper}</div>`;
         }).join('');
         listEl.innerHTML = html;
     }
-    
+
     selectPOSCustomer(id, name) {
         this.posCart.customerId = id;
         this.posCart.customerName = name;
@@ -4655,16 +4675,16 @@ class HamobileBanhang {
         const customers = realCustomers.filter(c =>
             !term || this.searchMatch(c.name, term) || (c.phone && this.searchMatch(c.phone, term))
         );
-        const searchHtml = `<input type="text" class="pos-header-customer-search" placeholder="Tìm tên, SĐT..." value="${(term||'').replace(/"/g,'&quot;')}" oninput="app.renderHeaderCustomerDropdown(this.value)" onclick="event.stopPropagation()" style="width:100%;padding:8px 12px;border:none;border-bottom:1px solid #e5e7eb;font-size:13px;box-sizing:border-box;">`;
+        const searchHtml = `<input type="text" class="pos-header-customer-search" placeholder="Tìm tên, SĐT..." value="${(term || '').replace(/"/g, '&quot;')}" oninput="app.renderHeaderCustomerDropdown(this.value)" onclick="event.stopPropagation()" style="width:100%;padding:8px 12px;border:none;border-bottom:1px solid #e5e7eb;font-size:13px;box-sizing:border-box;">`;
         const khachLeHtml = `<div onclick="app.selectPOSCustomer('KH_LE','Khách lẻ')" style="padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-weight: 600; color: #059669;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">Khách lẻ</div>`;
         const listHtml = customers.length ? customers.map(c => {
             const debt = this.getActualDebtForCustomer(c);
             const debtText = debt > 0 ? ` • Nợ: ${debt.toLocaleString('vi-VN')}` : '';
-            return `<div onclick="app.selectPOSCustomer('${c.id}','${(c.name||'').replace(/'/g,"\\'")}')" style="padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">${(c.name||'').replace(/</g,'&lt;')}${debtText}</div>`;
+            return `<div onclick="app.selectPOSCustomer('${c.id}','${(c.name || '').replace(/'/g, "\\'")}')" style="padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">${(c.name || '').replace(/</g, '&lt;')}${debtText}</div>`;
         }).join('') : '<div style="padding: 12px; color: #6b7280; font-size: 13px;">Không tìm thấy</div>';
         dd.innerHTML = searchHtml + khachLeHtml + listHtml;
     }
-    
+
     goToPOSMobileStep(step) {
         this.posMobileStep = step;
         this.loadPage('sales');
@@ -4697,12 +4717,12 @@ class HamobileBanhang {
             return `<div class="pos-product-card pos-mobile-step1-card" data-product-id="${p.id}" onclick="${canSell ? `app.addProductToPOS('${p.id}')` : ''}" style="display:block;padding:10px 12px;border:2px solid ${qty > 0 ? '#059669' : '#e5e7eb'};border-radius:10px;cursor:${canSell ? 'pointer' : 'not-allowed'};margin-bottom:8px;background:${canSell ? 'white' : '#f9fafb'};opacity:${canSell ? 1 : 0.6};">
                 <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
                     <div style="flex:1;min-width:0;">
-                        <div style="font-weight:700;font-size:14px;color:${canSell ? '#1f2937' : '#9ca3af'};line-height:1.4;">${(p.name||'').replace(/</g,'&lt;')}${cartBadge}</div>
-                        <div style="font-weight:700;font-size:14px;color:#059669;margin-top:4px;">${(p.price||0).toLocaleString('vi-VN')}</div>
+                        <div style="font-weight:700;font-size:14px;color:${canSell ? '#1f2937' : '#9ca3af'};line-height:1.4;">${(p.name || '').replace(/</g, '&lt;')}${cartBadge}</div>
+                        <div style="font-weight:700;font-size:14px;color:#059669;margin-top:4px;">${(p.price || 0).toLocaleString('vi-VN')}</div>
                         ${imeiLine}
                     </div>
                     <div style="flex-shrink:0;text-align:right;">
-                        <div style="font-size:12px;color:#6b7280;font-weight:500;white-space:nowrap;">${(p.id||'').replace(/</g,'&lt;')}</div>
+                        <div style="font-size:12px;color:#6b7280;font-weight:500;white-space:nowrap;">${(p.id || '').replace(/</g, '&lt;')}</div>
                         ${stockText}
                     </div>
                 </div>
@@ -4739,7 +4759,7 @@ class HamobileBanhang {
         resultsEl.innerHTML = products.map(p => {
             const stock = (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
             const canSell = stock > 0;
-            return `<div class="pos-step2-search-item" onclick="${canSell ? `app.addProductFromStep2Search('${p.id}')` : ''}" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #f3f4f6; cursor: ${canSell ? 'pointer' : 'not-allowed'}; background: ${canSell ? 'white' : '#f9fafb'};" onmouseover="if(${canSell}) this.style.background='#ecfdf5'" onmouseout="this.style.background='${canSell ? 'white' : '#f9fafb'}'"><div style="flex: 1; min-width: 0;"><div style="font-weight: 600; font-size: 13px; line-height: 1.4;">${(p.name||'').replace(/</g,'&lt;')}</div><div style="font-size: 11px; color: #6b7280; line-height: 1.4; margin-top: 2px;">${(p.id||'').replace(/</g,'&lt;')} • ${stock} tồn</div>${this.buildPosImeiLineForProductList(p)}</div><div style="font-weight: 600; color: #059669; flex-shrink: 0;">${(p.price||0).toLocaleString('vi-VN')}</div></div>`;
+            return `<div class="pos-step2-search-item" onclick="${canSell ? `app.addProductFromStep2Search('${p.id}')` : ''}" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #f3f4f6; cursor: ${canSell ? 'pointer' : 'not-allowed'}; background: ${canSell ? 'white' : '#f9fafb'};" onmouseover="if(${canSell}) this.style.background='#ecfdf5'" onmouseout="this.style.background='${canSell ? 'white' : '#f9fafb'}'"><div style="flex: 1; min-width: 0;"><div style="font-weight: 600; font-size: 13px; line-height: 1.4;">${(p.name || '').replace(/</g, '&lt;')}</div><div style="font-size: 11px; color: #6b7280; line-height: 1.4; margin-top: 2px;">${(p.id || '').replace(/</g, '&lt;')} • ${stock} tồn</div>${this.buildPosImeiLineForProductList(p)}</div><div style="font-weight: 600; color: #059669; flex-shrink: 0;">${(p.price || 0).toLocaleString('vi-VN')}</div></div>`;
         }).join('');
     }
     addProductFromStep2Search(productId) {
@@ -4755,7 +4775,7 @@ class HamobileBanhang {
         const p = (this.demoData.products || []).find(x => x.id === item.productId);
         const origPrice = item.originalPrice != null ? item.originalPrice : (p ? (p.price || 0) : (item.price || 0));
         const priceEdited = origPrice > 0 && (item.price || 0) !== origPrice;
-        const priceDisplayModal = priceEdited ? `<div style="margin-top: 4px; font-size: 13px;"><span style="text-decoration: line-through; color: #9ca3af;">${(origPrice||0).toLocaleString('vi-VN')}</span> <span style="color: #059669; font-weight: 700;">${(item.price||0).toLocaleString('vi-VN')}</span></div>` : `<div style="font-weight: 600; font-size: 16px; color: #059669; margin-top: 4px;">${(item.price||0).toLocaleString('vi-VN')}</div>`;
+        const priceDisplayModal = priceEdited ? `<div style="margin-top: 4px; font-size: 13px;"><span style="text-decoration: line-through; color: #9ca3af;">${(origPrice || 0).toLocaleString('vi-VN')}</span> <span style="color: #059669; font-weight: 700;">${(item.price || 0).toLocaleString('vi-VN')}</span></div>` : `<div style="font-weight: 600; font-size: 16px; color: #059669; margin-top: 4px;">${(item.price || 0).toLocaleString('vi-VN')}</div>`;
         const rawTotal = (item.quantity || 1) * (item.price || 0);
         const itemDisc = Math.max(0, parseInt(item.discount, 10) || 0);
         const sellPrice = Math.max(0, rawTotal - itemDisc);
@@ -4771,8 +4791,8 @@ class HamobileBanhang {
         inner.onclick = (e) => e.stopPropagation();
         inner.innerHTML = `
             <div style="margin-bottom: 20px;">
-                <div style="font-weight: 700; font-size: 16px; line-height: 1.4;">${(item.name||'').replace(/</g,'&lt;')}</div>
-                <div style="font-size: 12px; color: #6b7280; line-height: 1.4; margin-top: 4px;">${(item.productId || '').replace(/</g,'&lt;')} • 1 KH đặt: 0</div>
+                <div style="font-weight: 700; font-size: 16px; line-height: 1.4;">${(item.name || '').replace(/</g, '&lt;')}</div>
+                <div style="font-size: 12px; color: #6b7280; line-height: 1.4; margin-top: 4px;">${(item.productId || '').replace(/</g, '&lt;')} • 1 KH đặt: 0</div>
                 ${imeiDetailLine}
                 ${priceDisplayModal}
             </div>
@@ -4786,7 +4806,7 @@ class HamobileBanhang {
             </div>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                 <span>Đơn giá</span>
-                <input type="text" id="pos-detail-price" value="${(item.price||0).toLocaleString('vi-VN')}" oninput="app._posDetailUpdate(${idx})" style="width: 120px; padding: 8px; border: 2px solid #e5e7eb; border-radius: 8px; text-align: right;">
+                <input type="text" id="pos-detail-price" value="${(item.price || 0).toLocaleString('vi-VN')}" oninput="app._posDetailUpdate(${idx})" style="width: 120px; padding: 8px; border: 2px solid #e5e7eb; border-radius: 8px; text-align: right;">
             </div>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                 <span>Giảm giá (%)</span>
@@ -4872,17 +4892,17 @@ class HamobileBanhang {
             const debtStr = debt > 0 ? `Nợ: ${debt.toLocaleString('vi-VN')}` : '';
             const badges = [];
             if (debtStr) badges.push(`<span class="pos-customer-badge pos-customer-debt">${debtStr}</span>`);
-            return `<div class="pos-customer-full-row" onclick="app.selectPOSCustomer('${c.id}','${(c.name||'').replace(/'/g,"\\'")}'); document.getElementById('pos-customer-list-full-modal').remove();">
+            return `<div class="pos-customer-full-row" onclick="app.selectPOSCustomer('${c.id}','${(c.name || '').replace(/'/g, "\\'")}'); document.getElementById('pos-customer-list-full-modal').remove();">
                 <div class="pos-customer-full-avatar">👤</div>
                 <div class="pos-customer-full-info">
-                    <div class="pos-customer-full-name">${(c.name||'').replace(/</g,'&lt;')}</div>
+                    <div class="pos-customer-full-name">${(c.name || '').replace(/</g, '&lt;')}</div>
                     <div class="pos-customer-full-details">${badges.join(' ')}</div>
                 </div>
             </div>`;
         }).join('');
         listEl.innerHTML = khachLeRow + rows;
     }
-    
+
     showPOSCustomerList() {
         const dd = document.getElementById('pos-customer-dropdown');
         const inp = document.getElementById('pos-customer-search');
@@ -4891,7 +4911,7 @@ class HamobileBanhang {
             this.filterPOSCustomer(inp ? inp.value : '');
         }
     }
-    
+
     filterPOSCustomer(q) {
         const term = (q || '').trim();
         const realCustomers = (this.demoData.customers || []).filter(c => c.id !== 'KH_LE' && !(c.id && c.id.startsWith('KL_')));
@@ -4904,11 +4924,11 @@ class HamobileBanhang {
         const listHtml = customers.length ? customers.map(c => {
             const debt = this.getActualDebtForCustomer(c);
             const debtText = debt > 0 ? ` • Nợ: ${debt.toLocaleString('vi-VN')}` : '';
-            return `<div onclick="app.selectPOSCustomer('${c.id}','${(c.name||'').replace(/'/g,"\\'")}')" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">${(c.name||'').replace(/</g,'&lt;')}${debtText}</div>`;
+            return `<div onclick="app.selectPOSCustomer('${c.id}','${(c.name || '').replace(/'/g, "\\'")}')" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">${(c.name || '').replace(/</g, '&lt;')}${debtText}</div>`;
         }).join('') : '<div style="padding: 12px; color: #6b7280;">Không tìm thấy</div>';
         dd.innerHTML = khachLeHtml + listHtml;
     }
-    
+
     submitPOSOrder() {
         if (!this.posCart.items || this.posCart.items.length === 0) {
             this.showNotification('Chưa có sản phẩm trong đơn', 'error');
@@ -4998,8 +5018,8 @@ class HamobileBanhang {
             return;
         }
         const vietnamTime = this.getVietnamTime();
-        const dateStr = vietnamTime.toISOString().split('T')[0];
-        const timeStr = vietnamTime.toTimeString().slice(0, 8);
+        const dateStr = this.getVietnamDateKey(vietnamTime);
+        const timeStr = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(vietnamTime);
         const totalGoods = products.reduce((s, x) => s + x.subtotal, 0);
         const discount = Math.max(0, parseInt(this.posCart.discount, 10) || 0);
         const total = Math.max(0, totalGoods - discount);
@@ -5071,7 +5091,7 @@ class HamobileBanhang {
         this.addActivityLog('success', '💰', `Đơn ${newOrder.id}`, `${customer.name} - ${total.toLocaleString('vi-VN')} VNĐ`, 'order');
         this.showPrintOptionsPopup(0);
     }
-    
+
     submitPOSOrderAsDebt() {
         if (!this.posCart.items || this.posCart.items.length === 0) {
             this.showNotification('Chưa có sản phẩm trong đơn', 'error');
@@ -5083,7 +5103,7 @@ class HamobileBanhang {
         this.submitPOSOrder();
         this.posCart._saveAsDebt = false;
     }
-    
+
     getPurchasesContent() {
         return `
             <div class="fade-in">
@@ -5125,7 +5145,7 @@ class HamobileBanhang {
             </div>
         `;
     }
-    
+
     _matchCustomer(o, c) {
         if (o.customerId === c.id || o.customerName === c.name || o.customerId === c.name || o.customerName === c.id) return true;
         const n = (s) => (s || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
@@ -5138,7 +5158,7 @@ class HamobileBanhang {
     getActualDebtForCustomer(c) {
         const orders = (this.demoData.orders || []).filter(o => this._matchCustomer(o, c));
         const orderDebt = orders.reduce((sum, order) => sum + Math.max(0, (order.total || 0) - (order.amountPaid != null ? order.amountPaid : (order.paymentStatus === 'Đã thanh toán' ? order.total : 0))), 0);
-        const repairs = (this.demoData.repairs || []).filter(r => 
+        const repairs = (this.demoData.repairs || []).filter(r =>
             (r.status || '') === 'Đã trả' && this._matchCustomer(r, c)
         );
         const repairDebt = repairs.reduce((sum, r) => {
@@ -5450,13 +5470,13 @@ class HamobileBanhang {
                     <h3 style="margin-bottom: 16px; color: var(--text-primary);">Khách hàng có công nợ (đơn hàng + sửa chữa):</h3>
                     ${customersWithActualDebt.length === 0 ? '<p style="color: #6b7280;">Không có khách hàng nào đang nợ.</p>' : ''}
                     ${customersWithActualDebt.map(customer => {
-                        const actualDebt = this.getActualDebtForCustomer(customer);
-                        const debtDays = this.getCustomerDebtDays(customer);
-                        const oldestDate = this.getCustomerDebtOldestDateStr(customer);
-                        const oldestDateStr = oldestDate ? this.formatViDateFromYMD(oldestDate) : '';
-                        const dayColor = debtDays >= 30 ? '#dc2626' : debtDays >= 14 ? '#d97706' : '#6b7280';
-                        const dayBg = debtDays >= 30 ? '#fee2e2' : debtDays >= 14 ? '#fef3c7' : '#f3f4f6';
-                        return `
+            const actualDebt = this.getActualDebtForCustomer(customer);
+            const debtDays = this.getCustomerDebtDays(customer);
+            const oldestDate = this.getCustomerDebtOldestDateStr(customer);
+            const oldestDateStr = oldestDate ? this.formatViDateFromYMD(oldestDate) : '';
+            const dayColor = debtDays >= 30 ? '#dc2626' : debtDays >= 14 ? '#d97706' : '#6b7280';
+            const dayBg = debtDays >= 30 ? '#fee2e2' : debtDays >= 14 ? '#fef3c7' : '#f3f4f6';
+            return `
                         <div class="activity-item debt-customer-row">
                             <div class="activity-icon warning">💳</div>
                             <div class="activity-content">
@@ -5555,7 +5575,7 @@ class HamobileBanhang {
             address: c.address || ''
         }));
     }
-    
+
     getOrdersContent() {
         if (!this.selectedOrderIds) this.selectedOrderIds = new Set();
         if (this.ordersSearchQuery === undefined) this.ordersSearchQuery = '';
@@ -5752,7 +5772,7 @@ class HamobileBanhang {
         el.focus();
         try {
             el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        } catch (_) {}
+        } catch (_) { }
     }
 
     toggleOrdersMobileSort() {
@@ -6054,7 +6074,8 @@ class HamobileBanhang {
                     </div>
                 </td>
             </tr>
-        `; }).join('');
+        `;
+        }).join('');
 
         return `
             <div class="fade-in">
@@ -6265,7 +6286,7 @@ class HamobileBanhang {
                                                 <input type="text" class="dropdown-search" placeholder="🔍 Tìm sản phẩm..." style="width: 100%; padding: 6px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;" oninput="app.filterRepairPartDropdown(this)" onclick="event.stopPropagation()">
                                             </div>
                                             <div class="dropdown-options">
-                                                ${(this.demoData.products || []).map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category||'')}" data-price="${p.price||0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name||'').replace(/'/g,"\\'")} - ${(p.price||0).toLocaleString('vi-VN')} đ', ${p.price||0})">${escapeHtml(p.name||'')} - ${(p.price||0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category||'-')})</div>`).join('')}
+                                                ${(this.demoData.products || []).map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category || '')}" data-price="${p.price || 0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name || '').replace(/'/g, "\\'")} - ${(p.price || 0).toLocaleString('vi-VN')} đ', ${p.price || 0})">${escapeHtml(p.name || '')} - ${(p.price || 0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category || '-')})</div>`).join('')}
                                             </div>
                                         </div>
                                         <input type="hidden" name="partProductId_0" value="">
@@ -6409,7 +6430,7 @@ class HamobileBanhang {
         if (!container) return;
         const rowCount = container.querySelectorAll('.repair-part-row').length;
         const products = this.demoData.products || [];
-        const optsHtml = products.map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category||'')}" data-price="${p.price||0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name||'').replace(/'/g,"\\'")} - ${(p.price||0).toLocaleString('vi-VN')} đ', ${p.price||0})">${escapeHtml(p.name||'')} - ${(p.price||0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category||'-')})</div>`).join('');
+        const optsHtml = products.map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category || '')}" data-price="${p.price || 0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name || '').replace(/'/g, "\\'")} - ${(p.price || 0).toLocaleString('vi-VN')} đ', ${p.price || 0})">${escapeHtml(p.name || '')} - ${(p.price || 0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category || '-')})</div>`).join('');
         const div = document.createElement('div');
         div.className = 'repair-part-row';
         div.style.cssText = 'display: flex; gap: 8px; margin-bottom: 8px; align-items: center;';
@@ -6604,10 +6625,10 @@ class HamobileBanhang {
             `<option value="${escapeHtml(c.id)}" ${(r.customerId === c.id || r.customerName === c.name) ? 'selected' : ''} data-phone="${escapeHtml(c.phone || '')}" data-address="${escapeHtml(c.address || '')}">${escapeHtml(c.name)}</option>`
         ).join('');
         const products = this.demoData.products || [];
-        const optsHtml = products.map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category||'')}" data-price="${p.price||0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name||'').replace(/'/g,"\\'")} - ${(p.price||0).toLocaleString('vi-VN')} đ', ${p.price||0})">${escapeHtml(p.name||'')} - ${(p.price||0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category||'-')})</div>`).join('');
+        const optsHtml = products.map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category || '')}" data-price="${p.price || 0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name || '').replace(/'/g, "\\'")} - ${(p.price || 0).toLocaleString('vi-VN')} đ', ${p.price || 0})">${escapeHtml(p.name || '')} - ${(p.price || 0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category || '-')})</div>`).join('');
         const partRows = (r.parts || []).map((p, i) => {
             const prod = p.productId ? products.find(x => x.id === p.productId) : null;
-            const displayName = prod ? `${(prod.name||'').replace(/</g,'&lt;')} - ${(prod.price||0).toLocaleString('vi-VN')} đ` : (p.name||'').replace(/</g,'&lt;');
+            const displayName = prod ? `${(prod.name || '').replace(/</g, '&lt;')} - ${(prod.price || 0).toLocaleString('vi-VN')} đ` : (p.name || '').replace(/</g, '&lt;');
             const productId = prod ? prod.id : (p.productId || '');
             const price = p.price || (prod && prod.price) || 0;
             return `<div class="repair-part-row" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;" data-part-row="${i}">
@@ -6622,7 +6643,7 @@ class HamobileBanhang {
                         </div>
                         <div class="dropdown-options">${optsHtml}</div>
                     </div>
-                    <input type="hidden" name="partProductId_${i}" value="${(productId||'').replace(/"/g,'&quot;')}">
+                    <input type="hidden" name="partProductId_${i}" value="${(productId || '').replace(/"/g, '&quot;')}">
                 </div>
                 <input type="number" name="partQuantity_${i}" value="${p.quantity || 1}" min="1" style="width: 70px; padding: 8px; border: 2px solid #e5e7eb; border-radius: 6px;">
                 <input type="text" name="partPrice_${i}" value="${this.formatPrice(price)}" readonly style="width: 110px; padding: 8px; border: 2px solid #e5e7eb; border-radius: 6px; background: #f8fafc;">
@@ -6783,7 +6804,7 @@ class HamobileBanhang {
         if (!container) return;
         const rowCount = container.querySelectorAll('.repair-part-row').length;
         const products = this.demoData.products || [];
-        const optsHtml = products.map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category||'')}" data-price="${p.price||0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name||'').replace(/'/g,"\\'")} - ${(p.price||0).toLocaleString('vi-VN')} đ', ${p.price||0})">${escapeHtml(p.name||'')} - ${(p.price||0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category||'-')})</div>`).join('');
+        const optsHtml = products.map(p => `<div class="dropdown-option" data-value="${escapeHtml(p.id)}" data-category="${escapeHtml(p.category || '')}" data-price="${p.price || 0}" style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" onclick="app.selectRepairProduct(this, '${escapeHtml(p.id)}', '${(p.name || '').replace(/'/g, "\\'")} - ${(p.price || 0).toLocaleString('vi-VN')} đ', ${p.price || 0})">${escapeHtml(p.name || '')} - ${(p.price || 0).toLocaleString('vi-VN')} đ (${escapeHtml(p.category || '-')})</div>`).join('');
         const div = document.createElement('div');
         div.className = 'repair-part-row';
         div.style.cssText = 'display: flex; gap: 8px; margin-bottom: 8px; align-items: center;';
@@ -7002,7 +7023,7 @@ class HamobileBanhang {
         }
         pw.document.write(`
             <!DOCTYPE html>
-            <html lang="vi">
+            <html dir="ltr" lang="vi">
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7414,11 +7435,11 @@ class HamobileBanhang {
                             </thead>
                             <tbody id="reports-repairs-list">
                                 ${filteredRepairs.map(r => {
-                                    const rev = (r.status || '') === 'Đã trả' ? (Number(r.repairCost) || 0) : 0;
-                                    const cost = Number(r.repairCost) || 0;
-                                    const paid = Number(r.amountPaid) || 0;
-                                    const payStatus = (r.status || '') === 'Đã trả' ? (cost > 0 && paid < cost ? 'Công nợ' : 'Đã thanh toán') : '-';
-                                    return `<tr style="border-bottom: 1px solid #e5e7eb;">
+            const rev = (r.status || '') === 'Đã trả' ? (Number(r.repairCost) || 0) : 0;
+            const cost = Number(r.repairCost) || 0;
+            const paid = Number(r.amountPaid) || 0;
+            const payStatus = (r.status || '') === 'Đã trả' ? (cost > 0 && paid < cost ? 'Công nợ' : 'Đã thanh toán') : '-';
+            return `<tr style="border-bottom: 1px solid #e5e7eb;">
                                         <td style="padding: 12px;">${(r.id || '').replace(/</g, '&lt;')}</td>
                                         <td style="padding: 12px;">${(r.customerName || '-').replace(/</g, '&lt;')}</td>
                                         <td style="padding: 12px;">${(r.date || '-')} ${(r.time || '')}</td>
@@ -7426,7 +7447,7 @@ class HamobileBanhang {
                                         <td style="padding: 12px;">${payStatus.replace(/</g, '&lt;')}</td>
                                         <td style="padding: 12px;">${(r.status || '-').replace(/</g, '&lt;')}</td>
                                     </tr>`;
-                                }).join('')}
+        }).join('')}
                             </tbody>
                         </table>
                     </div>
@@ -7737,7 +7758,7 @@ class HamobileBanhang {
 
         const printHtml = `
             <!DOCTYPE html>
-            <html lang="vi">
+            <html dir="ltr" lang="vi">
             <head>
                 <meta charset="UTF-8">
                 <title>In mẫu ${selectedForm.toUpperCase()} - Quý ${selectedQuarter}/${selectedYear}</title>
@@ -8232,16 +8253,16 @@ class HamobileBanhang {
             </div>
         `;
     }
-    
+
     getRecentActivities() {
         const activities = [];
         const now = this.getVietnamTime();
         const orders = (this.demoData && this.demoData.orders) || [];
         const products = (this.demoData && this.demoData.products) || [];
         const customers = (this.demoData && this.demoData.customers) || [];
-        
+
         const recentOrders = orders.slice(0, 3);
-        
+
         recentOrders.forEach((order) => {
             if (!order || !order.date) return;
             let orderDateTime = this.parseOrderInstantVN(order.date, order.time);
@@ -8250,20 +8271,20 @@ class HamobileBanhang {
             }
             if (isNaN(orderDateTime.getTime())) orderDateTime = now;
             const activityTime = orderDateTime;
-            
+
             const icon = order.paymentStatus === 'Đã thanh toán' ? 'success' : 'info';
             const emoji = order.paymentStatus === 'Đã thanh toán' ? '💵' : '🧾';
             const totalStr = (Number(order.total) || 0).toLocaleString('vi-VN');
-            const title = order.paymentStatus === 'Đã thanh toán' ? 
-                `Đơn hàng ${order.id || ''} đã hoàn thành` : 
+            const title = order.paymentStatus === 'Đã thanh toán' ?
+                `Đơn hàng ${order.id || ''} đã hoàn thành` :
                 `Đơn hàng mới ${order.id || ''}`;
-            const desc = order.paymentStatus === 'Đã thanh toán' ? 
+            const desc = order.paymentStatus === 'Đã thanh toán' ?
                 `Khách hàng ${order.customerName || ''} đã thanh toán ${totalStr} VNĐ` :
                 `Khách hàng ${order.customerName || ''} đặt hàng trị giá ${totalStr} VNĐ`;
-                
+
             activities.push({ icon, emoji, title, desc, time: activityTime });
         });
-        
+
         // Sản phẩm sắp hết hàng
         const lowStockProducts = products.filter(p => p && (p.stock || 0) < 10);
         if (lowStockProducts.length > 0) {
@@ -8277,7 +8298,7 @@ class HamobileBanhang {
                 time: timeAgo
             });
         }
-        
+
         // Khách hàng có công nợ
         const debtCustomers = customers.filter(c => c && (c.debt || 0) > 0);
         if (debtCustomers.length > 0) {
@@ -8291,7 +8312,7 @@ class HamobileBanhang {
                 time: timeAgo
             });
         }
-        
+
         return activities.slice(0, 5).map(activity => `
             <div class="activity-item">
                 <div class="activity-icon ${activity.icon}">${activity.emoji}</div>
@@ -8461,19 +8482,19 @@ class HamobileBanhang {
         const chartBarsHtml =
             chartBuckets.length > 0
                 ? chartBuckets
-                      .map((item, index) => {
-                          const height = (item.revenue / maxChartRev) * 160;
-                          const isLast = index === chartBuckets.length - 1;
-                          const color = isLast ? '#22c55e' : '#cbd5e1';
-                          return `
+                    .map((item, index) => {
+                        const height = (item.revenue / maxChartRev) * 160;
+                        const isLast = index === chartBuckets.length - 1;
+                        const color = isLast ? '#22c55e' : '#cbd5e1';
+                        return `
                                     <div class="dashboard-trend-bar-col${isLast ? ' dashboard-trend-bar-col--active' : ''}">
                                         <div class="dashboard-trend-bar" style="background:${color};height:${Math.max(4, height)}px;">
                                             <span class="dashboard-trend-bar-tip">${this.formatTrendChartTip(item.revenue)}</span>
                                         </div>
                                         <div class="dashboard-trend-bar-label" title="${escapeHtml(item.labelTitle != null ? item.labelTitle : item.label)}">${escapeHtml(item.label)}</div>
                                     </div>`;
-                      })
-                      .join('')
+                    })
+                    .join('')
                 : '<p class="dashboard-trend-empty">Chưa có doanh thu trong kỳ.</p>';
 
         const _trendHtml = `
@@ -8598,27 +8619,26 @@ class HamobileBanhang {
                             <div class="wuxia-board-badge">BẢNG XẾP HẠNG</div>
                         </div>
                         <div class="wuxia-divider" aria-hidden="true"></div>
-                        ${
-                            topProducts.length
-                                ? (() => {
-                                      const maxQ = topProducts[0][1] || 1;
-                                      const rankDefs = [
-                                          { title:'Thiên Phẩm', color:'#FACC15', glow:'rgba(250,204,21,.45)', gf:'#FACC15', gt:'#F59E0B', badge:'👑', beast:'dragon' },
-                                          { title:'Thần Phẩm',  color:'#F87171', glow:'rgba(168,85,247,.45)', gf:'#EF4444', gt:'#A855F7', badge:'⚔️',  beast:'phoenix' },
-                                          { title:'Huyền Phẩm', color:'#60A5FA', glow:'rgba(59,130,246,.45)', gf:'#3B82F6', gt:'#06B6D4', badge:'⚡',  beast:'sword' },
-                                          { title:'Ngọc Phẩm',  color:'#4ADE80', glow:'rgba(34,197,94,.35)',  gf:'#22C55E', gt:'#10B981', badge:'💎',  beast:'' },
-                                          { title:'Ngọc Phẩm',  color:'#4ADE80', glow:'rgba(34,197,94,.35)',  gf:'#22C55E', gt:'#10B981', badge:'💎',  beast:'' },
-                                      ];
-                                      const steelDef = { title:'Thép Phẩm', color:'#9CA3AF', glow:'rgba(156,163,175,.2)', gf:'#9CA3AF', gt:'#6B7280', badge:'', beast:'' };
-                                      return topProducts.map((product, index) => {
-                                          const rank = index + 1;
-                                          const def = rankDefs[index] || steelDef;
-                                          const pct = (product[1] / maxQ) * 100;
-                                          const soldClass = rank === 1 ? 'wuxia-sold--1' : rank <= 3 ? 'wuxia-sold--2' : 'wuxia-sold--n';
-                                          const dragonSvg = def.beast === 'dragon' ? `<svg viewBox="0 0 382 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#451A03" stroke-width="32" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#92400E" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#D97706" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FDE68A" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#92400E" stroke-width="1.5" fill="none" opacity="0.6"><path d="M83,14 L87,24"/><path d="M98,14 L102,24"/><path d="M113,15 L117,25"/><path d="M152,46 L148,56"/><path d="M167,50 L163,60"/><path d="M178,50 L174,60"/><path d="M221,13 L225,23"/><path d="M236,13 L240,23"/><path d="M251,15 L255,25"/><path d="M288,42 L284,52"/><path d="M301,40 L297,50"/><path d="M314,22 L318,32"/></g><path d="M83,22 C81,30 79,37 77,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M83,22 C81,30 79,37 77,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M77,42 C75,46 73,47 73,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M87,42 C86,46 84,47 84,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M97,42 C99,46 101,47 101,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M214,42 C212,46 210,47 210,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M224,42 C223,46 221,47 221,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M234,42 C236,46 238,47 238,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M15,52 C10,46 7,38 9,30" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C10,46 7,38 9,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C8,58 5,64 7,70" stroke="#B45309" stroke-width="4" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.3;0.8;0.3" dur="1.8s" begin="0.4s" repeatCount="indefinite"/></path><path d="M348,14 C355,18 360,26 360,32" stroke="#92400E" stroke-width="18" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#D97706" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FDE68A" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FFFBEB" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#92400E" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#D97706" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#FEF3C7" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#78350F" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#B45309" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M374,26 L376,34" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M370,35 L372,27" stroke="#FEF3C7" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#B45309" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#FDE68A" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="363" cy="23" r="5" stroke="#92400E" stroke-width="2" fill="#D97706"/><circle cx="363" cy="23" r="2.8" fill="#1C1917"/><circle cx="361.5" cy="21" r="1.4" fill="white"/><circle cx="363" cy="23" r="5" stroke="#FDE68A" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;1;0.7" dur="2s" repeatCount="indefinite"/></circle><path d="M361,18 C359,12 356,6 354,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M361,18 C359,12 356,6 354,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#D97706" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#FEF3C7" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M356,30 C351,28 347,23 347,16" stroke="#D97706" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M356,36 C350,36 346,31 346,24" stroke="#B45309" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M376,25 C381,22 386,20 390,19" stroke="#FEF3C7" stroke-width="1.8" fill="none" stroke-linecap="round"/><path d="M376,26 C383,26 389,26 393,26" stroke="#FEF3C7" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M376,27 C381,30 386,32 390,33" stroke="#FEF3C7" stroke-width="1.4" fill="none" stroke-linecap="round" opacity="0.8"/><circle cx="344" cy="6" r="6" stroke="#FDE68A" stroke-width="2" fill="#FEF3C7"><animate attributeName="r" values="6;7;6" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;1;0.8" dur="1.6s" repeatCount="indefinite"/></circle><circle cx="342" cy="4" r="1.5" fill="white" opacity="0.9"/><circle cx="87" cy="4" r="2.5" fill="#FEF3C7"><animate attributeName="cy" values="4;-3;4" dur="3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="3s" repeatCount="indefinite"/></circle><circle cx="222" cy="4" r="2" fill="#FDE68A"><animate attributeName="cy" values="4;-3;4" dur="2.5s" begin="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="2.5s" begin="0.8s" repeatCount="indefinite"/></circle><circle cx="152" cy="62" r="1.8" fill="#D97706"><animate attributeName="cy" values="62;68;62" dur="2.2s" begin="1.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.6;0;0.6" dur="2.2s" begin="1.4s" repeatCount="indefinite"/></circle></svg>` : '';
-                                          const phoenixSvg = def.beast === 'phoenix' ? `<svg viewBox="0 0 280 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><g><animateTransform attributeName="transform" type="rotate" values="-6,100,38;-24,100,38;-6,100,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M94,39 C80,26 68,16 55,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M94,39 C80,26 68,16 55,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M82,40 C72,32 64,26 57,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M22,18 C16,22 10,28 8,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M8,32 C4,26 3,18 6,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M8,32 C4,26 3,18 6,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path></g><g><animateTransform attributeName="transform" type="rotate" values="6,180,38;24,180,38;6,180,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M186,39 C200,26 212,16 225,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M186,39 C200,26 212,16 225,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M198,40 C208,32 216,26 223,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M258,18 C264,22 270,28 272,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M272,32 C276,26 277,18 274,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path><path d="M272,32 C276,26 277,18 274,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path></g><ellipse cx="141" cy="41" rx="23" ry="15" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="ry" values="15;16.5;15" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FCA5A5" stroke-width="3" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FFF1F2" stroke-width="1" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><circle cx="140" cy="19" r="12" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FCA5A5" stroke-width="2.5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FFF1F2" stroke-width="0.8" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="133" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="133" cy="17" r="2.8" fill="#1C1917"/><circle cx="131.8" cy="15.5" r="1.2" fill="white"/><circle cx="133" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/></circle><circle cx="147" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="147" cy="17" r="2.8" fill="#1C1917"/><circle cx="145.8" cy="15.5" r="1.2" fill="white"/><circle cx="147" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="0.3s" repeatCount="indefinite"/></circle><path d="M137,27 L140,33 L143,27" stroke="#7F1D1D" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M137,27 L140,33 L143,27" stroke="#FCD34D" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M134,8 C132,3 130,-1 132,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#4C1D95" stroke-width="6" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#A855F7" stroke-width="3" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#F3E8FF" stroke-width="0.9" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><g><animateTransform attributeName="transform" type="rotate" values="-5,140,52;5,140,52;-5,140,52" dur="2s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M140,52 C138,61 136,68 134,72" stroke="#4C1D95" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#A855F7" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#F3E8FF" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C134,60 130,64 127,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M140,52 C146,60 150,64 153,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M134,72 C132,76 130,76 130,74" stroke="#FCD34D" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M129,70 C127,74 125,74 125,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.1s" begin="0.3s" repeatCount="indefinite"/></path><path d="M151,70 C153,74 155,74 155,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.0s" begin="0.6s" repeatCount="indefinite"/></path></g><circle cx="108" cy="28" r="2.5" fill="#FCD34D"><animate attributeName="cy" values="28;15;28" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0;0.9" dur="1.8s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="1.8s" repeatCount="indefinite"/></circle><circle cx="172" cy="26" r="2.2" fill="#EF4444"><animate attributeName="cy" values="26;13;26" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="r" values="2.2;0.4;2.2" dur="2.0s" begin="0.5s" repeatCount="indefinite"/></circle><circle cx="125" cy="30" r="1.8" fill="#FCA5A5"><animate attributeName="cy" values="30;17;30" dur="1.5s" begin="0.9s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.5s" begin="0.9s" repeatCount="indefinite"/></circle><circle cx="155" cy="28" r="2" fill="#A855F7"><animate attributeName="cy" values="28;15;28" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="2.2s" begin="0.3s" repeatCount="indefinite"/></circle></svg>` : '';
-                                          const swordSvg = def.beast === 'sword' ? `<svg viewBox="0 0 220 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#0C1445" stroke-width="32" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#1E3A8A" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#2563EB" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#60A5FA" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#EFF6FF" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#0F2D6E" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.7"><path d="M75,36 C74,44 74,52 75,58"/><path d="M92,34 C91,42 91,50 92,57"/><path d="M110,34 C109,42 109,50 110,56"/><path d="M128,34 C127,42 127,50 128,56"/><path d="M146,34 C145,41 145,49 146,55"/></g><g stroke="#93C5FD" stroke-width="1.2" fill="none" stroke-linecap="round" opacity="0.5"><path d="M77,37 C76,44 76,51 77,57"/><path d="M94,35 C93,42 93,49 94,55"/><path d="M112,35 C111,42 111,49 112,55"/></g><path d="M165,50 C167,56 168,62 168,66" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#3B82F6" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#1E3A8A" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#3B82F6" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M165,66 L163,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M168,66 L167,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M173,66 L172,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M176,66 L175,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#2563EB" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M55,68 L53,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,68 L57,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M61,68 L61,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#0F2D6E" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#1D4ED8" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#60A5FA" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#EFF6FF" stroke-width="1" fill="none" stroke-linecap="round"/><path d="M18,12 C20,8 22,6 20,10" stroke="#93C5FD" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#0C1445" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#1E3A8A" stroke-width="15" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#3B82F6" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#93C5FD" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#EFF6FF" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="192" cy="22" r="20" stroke="#0C1445" stroke-width="6" fill="none"/><circle cx="192" cy="22" r="20" stroke="#1E3A8A" stroke-width="14" fill="none"/><circle cx="192" cy="22" r="20" stroke="#2563EB" stroke-width="8" fill="none"/><circle cx="192" cy="22" r="20" stroke="#60A5FA" stroke-width="4" fill="none"/><circle cx="192" cy="22" r="20" stroke="#EFF6FF" stroke-width="1.2" fill="none"/><path d="M177,10 L172,0 L182,8Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M177,10 L173,3 L181,8Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><path d="M200,8 L204,0 L210,10Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M201,9 L205,2 L208,9Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><g stroke="#0F2D6E" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.65"><path d="M180,12 C181,18 181,24 179,30"/><path d="M190,10 C191,16 191,22 190,29"/><path d="M200,12 C201,18 200,24 198,30"/></g><path d="M181,14 L185,9 L189,14 L193,9 L197,14" stroke="#BFDBFE" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/><circle cx="182" cy="22" r="6" stroke="#0C1445" stroke-width="2" fill="#1D4ED8"/><circle cx="182" cy="22" r="4" fill="#0F172A"/><circle cx="182" cy="22" r="2" fill="#60A5FA"/><circle cx="180.5" cy="20" r="1.3" fill="white"/><circle cx="182" cy="22" r="7" stroke="#60A5FA" stroke-width="0.9" fill="none"><animate attributeName="r" values="7;9;7" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;0.9;0.5" dur="2s" repeatCount="indefinite"/></circle><ellipse cx="206" cy="24" rx="4" ry="3" stroke="#1E3A8A" stroke-width="2" fill="#0F2D6E"/><ellipse cx="205" cy="23" rx="1.5" ry="1" fill="#BFDBFE" opacity="0.7"/><path d="M204,22 C210,20 216,18 220,17" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,24 C211,24 217,24 221,24" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,26 C210,28 216,30 220,31" stroke="#DBEAFE" stroke-width="1.3" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#1E3A8A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#60A5FA" stroke-width="0.7" fill="none" stroke-linecap="round"/><path d="M110,16 L115,24 L109,23 L114,32" stroke="#BFDBFE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M110,16 L115,24 L109,23 L114,32" stroke="white" stroke-width="0.7" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M84,14 L88,22 L82,21 L87,30" stroke="#93C5FD" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="2.0s" begin="0.4s" repeatCount="indefinite"/></path><path d="M138,12 L142,20 L136,19 L141,28" stroke="#BFDBFE" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="1.8s" begin="0.7s" repeatCount="indefinite"/></path><circle cx="85" cy="22" r="2.5" fill="#93C5FD"><animate attributeName="cy" values="22;12;22" dur="2.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="2.2s" repeatCount="indefinite"/></circle><circle cx="120" cy="18" r="2" fill="#60A5FA"><animate attributeName="cy" values="18;8;18" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="1.9s" begin="0.6s" repeatCount="indefinite"/></circle><circle cx="150" cy="16" r="1.6" fill="#BFDBFE"><animate attributeName="cy" values="16;6;16" dur="1.7s" begin="1.1s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.7s" begin="1.1s" repeatCount="indefinite"/></circle></svg>` : '';
-                                          return `
+                        ${topProducts.length
+                ? (() => {
+                    const maxQ = topProducts[0][1] || 1;
+                    const rankDefs = [
+                        { title: 'Thiên Phẩm', color: '#FACC15', glow: 'rgba(250,204,21,.45)', gf: '#FACC15', gt: '#F59E0B', badge: '👑', beast: 'dragon' },
+                        { title: 'Thần Phẩm', color: '#F87171', glow: 'rgba(168,85,247,.45)', gf: '#EF4444', gt: '#A855F7', badge: '⚔️', beast: 'phoenix' },
+                        { title: 'Huyền Phẩm', color: '#60A5FA', glow: 'rgba(59,130,246,.45)', gf: '#3B82F6', gt: '#06B6D4', badge: '⚡', beast: 'sword' },
+                        { title: 'Ngọc Phẩm', color: '#4ADE80', glow: 'rgba(34,197,94,.35)', gf: '#22C55E', gt: '#10B981', badge: '💎', beast: '' },
+                        { title: 'Ngọc Phẩm', color: '#4ADE80', glow: 'rgba(34,197,94,.35)', gf: '#22C55E', gt: '#10B981', badge: '💎', beast: '' },
+                    ];
+                    const steelDef = { title: 'Thép Phẩm', color: '#9CA3AF', glow: 'rgba(156,163,175,.2)', gf: '#9CA3AF', gt: '#6B7280', badge: '', beast: '' };
+                    return topProducts.map((product, index) => {
+                        const rank = index + 1;
+                        const def = rankDefs[index] || steelDef;
+                        const pct = (product[1] / maxQ) * 100;
+                        const soldClass = rank === 1 ? 'wuxia-sold--1' : rank <= 3 ? 'wuxia-sold--2' : 'wuxia-sold--n';
+                        const dragonSvg = def.beast === 'dragon' ? `<svg viewBox="0 0 382 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#451A03" stroke-width="32" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#92400E" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#D97706" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FDE68A" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#92400E" stroke-width="1.5" fill="none" opacity="0.6"><path d="M83,14 L87,24"/><path d="M98,14 L102,24"/><path d="M113,15 L117,25"/><path d="M152,46 L148,56"/><path d="M167,50 L163,60"/><path d="M178,50 L174,60"/><path d="M221,13 L225,23"/><path d="M236,13 L240,23"/><path d="M251,15 L255,25"/><path d="M288,42 L284,52"/><path d="M301,40 L297,50"/><path d="M314,22 L318,32"/></g><path d="M83,22 C81,30 79,37 77,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M83,22 C81,30 79,37 77,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M77,42 C75,46 73,47 73,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M87,42 C86,46 84,47 84,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M97,42 C99,46 101,47 101,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M214,42 C212,46 210,47 210,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M224,42 C223,46 221,47 221,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M234,42 C236,46 238,47 238,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M15,52 C10,46 7,38 9,30" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C10,46 7,38 9,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C8,58 5,64 7,70" stroke="#B45309" stroke-width="4" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.3;0.8;0.3" dur="1.8s" begin="0.4s" repeatCount="indefinite"/></path><path d="M348,14 C355,18 360,26 360,32" stroke="#92400E" stroke-width="18" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#D97706" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FDE68A" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FFFBEB" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#92400E" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#D97706" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#FEF3C7" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#78350F" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#B45309" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M374,26 L376,34" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M370,35 L372,27" stroke="#FEF3C7" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#B45309" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#FDE68A" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="363" cy="23" r="5" stroke="#92400E" stroke-width="2" fill="#D97706"/><circle cx="363" cy="23" r="2.8" fill="#1C1917"/><circle cx="361.5" cy="21" r="1.4" fill="white"/><circle cx="363" cy="23" r="5" stroke="#FDE68A" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;1;0.7" dur="2s" repeatCount="indefinite"/></circle><path d="M361,18 C359,12 356,6 354,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M361,18 C359,12 356,6 354,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#D97706" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#FEF3C7" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M356,30 C351,28 347,23 347,16" stroke="#D97706" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M356,36 C350,36 346,31 346,24" stroke="#B45309" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M376,25 C381,22 386,20 390,19" stroke="#FEF3C7" stroke-width="1.8" fill="none" stroke-linecap="round"/><path d="M376,26 C383,26 389,26 393,26" stroke="#FEF3C7" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M376,27 C381,30 386,32 390,33" stroke="#FEF3C7" stroke-width="1.4" fill="none" stroke-linecap="round" opacity="0.8"/><circle cx="344" cy="6" r="6" stroke="#FDE68A" stroke-width="2" fill="#FEF3C7"><animate attributeName="r" values="6;7;6" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;1;0.8" dur="1.6s" repeatCount="indefinite"/></circle><circle cx="342" cy="4" r="1.5" fill="white" opacity="0.9"/><circle cx="87" cy="4" r="2.5" fill="#FEF3C7"><animate attributeName="cy" values="4;-3;4" dur="3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="3s" repeatCount="indefinite"/></circle><circle cx="222" cy="4" r="2" fill="#FDE68A"><animate attributeName="cy" values="4;-3;4" dur="2.5s" begin="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="2.5s" begin="0.8s" repeatCount="indefinite"/></circle><circle cx="152" cy="62" r="1.8" fill="#D97706"><animate attributeName="cy" values="62;68;62" dur="2.2s" begin="1.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.6;0;0.6" dur="2.2s" begin="1.4s" repeatCount="indefinite"/></circle></svg>` : '';
+                        const phoenixSvg = def.beast === 'phoenix' ? `<svg viewBox="0 0 280 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><g><animateTransform attributeName="transform" type="rotate" values="-6,100,38;-24,100,38;-6,100,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M94,39 C80,26 68,16 55,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M94,39 C80,26 68,16 55,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M82,40 C72,32 64,26 57,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M22,18 C16,22 10,28 8,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M8,32 C4,26 3,18 6,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M8,32 C4,26 3,18 6,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path></g><g><animateTransform attributeName="transform" type="rotate" values="6,180,38;24,180,38;6,180,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M186,39 C200,26 212,16 225,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M186,39 C200,26 212,16 225,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M198,40 C208,32 216,26 223,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M258,18 C264,22 270,28 272,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M272,32 C276,26 277,18 274,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path><path d="M272,32 C276,26 277,18 274,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path></g><ellipse cx="141" cy="41" rx="23" ry="15" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="ry" values="15;16.5;15" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FCA5A5" stroke-width="3" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FFF1F2" stroke-width="1" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><circle cx="140" cy="19" r="12" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FCA5A5" stroke-width="2.5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FFF1F2" stroke-width="0.8" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="133" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="133" cy="17" r="2.8" fill="#1C1917"/><circle cx="131.8" cy="15.5" r="1.2" fill="white"/><circle cx="133" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/></circle><circle cx="147" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="147" cy="17" r="2.8" fill="#1C1917"/><circle cx="145.8" cy="15.5" r="1.2" fill="white"/><circle cx="147" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="0.3s" repeatCount="indefinite"/></circle><path d="M137,27 L140,33 L143,27" stroke="#7F1D1D" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M137,27 L140,33 L143,27" stroke="#FCD34D" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M134,8 C132,3 130,-1 132,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#4C1D95" stroke-width="6" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#A855F7" stroke-width="3" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#F3E8FF" stroke-width="0.9" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><g><animateTransform attributeName="transform" type="rotate" values="-5,140,52;5,140,52;-5,140,52" dur="2s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M140,52 C138,61 136,68 134,72" stroke="#4C1D95" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#A855F7" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#F3E8FF" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C134,60 130,64 127,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M140,52 C146,60 150,64 153,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M134,72 C132,76 130,76 130,74" stroke="#FCD34D" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M129,70 C127,74 125,74 125,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.1s" begin="0.3s" repeatCount="indefinite"/></path><path d="M151,70 C153,74 155,74 155,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.0s" begin="0.6s" repeatCount="indefinite"/></path></g><circle cx="108" cy="28" r="2.5" fill="#FCD34D"><animate attributeName="cy" values="28;15;28" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0;0.9" dur="1.8s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="1.8s" repeatCount="indefinite"/></circle><circle cx="172" cy="26" r="2.2" fill="#EF4444"><animate attributeName="cy" values="26;13;26" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="r" values="2.2;0.4;2.2" dur="2.0s" begin="0.5s" repeatCount="indefinite"/></circle><circle cx="125" cy="30" r="1.8" fill="#FCA5A5"><animate attributeName="cy" values="30;17;30" dur="1.5s" begin="0.9s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.5s" begin="0.9s" repeatCount="indefinite"/></circle><circle cx="155" cy="28" r="2" fill="#A855F7"><animate attributeName="cy" values="28;15;28" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="2.2s" begin="0.3s" repeatCount="indefinite"/></circle></svg>` : '';
+                        const swordSvg = def.beast === 'sword' ? `<svg viewBox="0 0 220 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#0C1445" stroke-width="32" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#1E3A8A" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#2563EB" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#60A5FA" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#EFF6FF" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#0F2D6E" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.7"><path d="M75,36 C74,44 74,52 75,58"/><path d="M92,34 C91,42 91,50 92,57"/><path d="M110,34 C109,42 109,50 110,56"/><path d="M128,34 C127,42 127,50 128,56"/><path d="M146,34 C145,41 145,49 146,55"/></g><g stroke="#93C5FD" stroke-width="1.2" fill="none" stroke-linecap="round" opacity="0.5"><path d="M77,37 C76,44 76,51 77,57"/><path d="M94,35 C93,42 93,49 94,55"/><path d="M112,35 C111,42 111,49 112,55"/></g><path d="M165,50 C167,56 168,62 168,66" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#3B82F6" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#1E3A8A" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#3B82F6" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M165,66 L163,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M168,66 L167,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M173,66 L172,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M176,66 L175,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#2563EB" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M55,68 L53,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,68 L57,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M61,68 L61,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#0F2D6E" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#1D4ED8" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#60A5FA" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#EFF6FF" stroke-width="1" fill="none" stroke-linecap="round"/><path d="M18,12 C20,8 22,6 20,10" stroke="#93C5FD" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#0C1445" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#1E3A8A" stroke-width="15" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#3B82F6" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#93C5FD" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#EFF6FF" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="192" cy="22" r="20" stroke="#0C1445" stroke-width="6" fill="none"/><circle cx="192" cy="22" r="20" stroke="#1E3A8A" stroke-width="14" fill="none"/><circle cx="192" cy="22" r="20" stroke="#2563EB" stroke-width="8" fill="none"/><circle cx="192" cy="22" r="20" stroke="#60A5FA" stroke-width="4" fill="none"/><circle cx="192" cy="22" r="20" stroke="#EFF6FF" stroke-width="1.2" fill="none"/><path d="M177,10 L172,0 L182,8Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M177,10 L173,3 L181,8Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><path d="M200,8 L204,0 L210,10Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M201,9 L205,2 L208,9Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><g stroke="#0F2D6E" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.65"><path d="M180,12 C181,18 181,24 179,30"/><path d="M190,10 C191,16 191,22 190,29"/><path d="M200,12 C201,18 200,24 198,30"/></g><path d="M181,14 L185,9 L189,14 L193,9 L197,14" stroke="#BFDBFE" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/><circle cx="182" cy="22" r="6" stroke="#0C1445" stroke-width="2" fill="#1D4ED8"/><circle cx="182" cy="22" r="4" fill="#0F172A"/><circle cx="182" cy="22" r="2" fill="#60A5FA"/><circle cx="180.5" cy="20" r="1.3" fill="white"/><circle cx="182" cy="22" r="7" stroke="#60A5FA" stroke-width="0.9" fill="none"><animate attributeName="r" values="7;9;7" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;0.9;0.5" dur="2s" repeatCount="indefinite"/></circle><ellipse cx="206" cy="24" rx="4" ry="3" stroke="#1E3A8A" stroke-width="2" fill="#0F2D6E"/><ellipse cx="205" cy="23" rx="1.5" ry="1" fill="#BFDBFE" opacity="0.7"/><path d="M204,22 C210,20 216,18 220,17" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,24 C211,24 217,24 221,24" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,26 C210,28 216,30 220,31" stroke="#DBEAFE" stroke-width="1.3" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#1E3A8A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#60A5FA" stroke-width="0.7" fill="none" stroke-linecap="round"/><path d="M110,16 L115,24 L109,23 L114,32" stroke="#BFDBFE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M110,16 L115,24 L109,23 L114,32" stroke="white" stroke-width="0.7" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M84,14 L88,22 L82,21 L87,30" stroke="#93C5FD" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="2.0s" begin="0.4s" repeatCount="indefinite"/></path><path d="M138,12 L142,20 L136,19 L141,28" stroke="#BFDBFE" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="1.8s" begin="0.7s" repeatCount="indefinite"/></path><circle cx="85" cy="22" r="2.5" fill="#93C5FD"><animate attributeName="cy" values="22;12;22" dur="2.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="2.2s" repeatCount="indefinite"/></circle><circle cx="120" cy="18" r="2" fill="#60A5FA"><animate attributeName="cy" values="18;8;18" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="1.9s" begin="0.6s" repeatCount="indefinite"/></circle><circle cx="150" cy="16" r="1.6" fill="#BFDBFE"><animate attributeName="cy" values="16;6;16" dur="1.7s" begin="1.1s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.7s" begin="1.1s" repeatCount="indefinite"/></circle></svg>` : '';
+                        return `
                                     <div class="wuxia-row" style="--wr-color:${def.color};--wr-glow:${def.glow};--wr-gf:${def.gf};--wr-gt:${def.gt}">
                                         ${def.beast ? `<div class="wuxia-beast wuxia-beast--${def.beast}">${dragonSvg}${phoenixSvg}${swordSvg}</div>` : ''}
                                         <div class="wuxia-row-inner">
@@ -8633,10 +8653,10 @@ class HamobileBanhang {
                                             <div class="wuxia-fill" style="width:${pct.toFixed(1)}%"><div class="wuxia-shine"></div></div>
                                         </div>
                                     </div>`;
-                                      }).join('');
-                                  })()
-                                : '<p class="wuxia-empty">Chưa có đơn chốt trong kỳ.</p>'
-                        }
+                    }).join('');
+                })()
+                : '<p class="wuxia-empty">Chưa có đơn chốt trong kỳ.</p>'
+            }
                         <div class="wuxia-ambient-bot" aria-hidden="true"></div>
                     </div>
                     <div class="wuxia-board-panel">
@@ -8652,28 +8672,27 @@ class HamobileBanhang {
                             <div class="wuxia-board-badge">TRUNG THÀNH</div>
                         </div>
                         <div class="wuxia-divider" aria-hidden="true"></div>
-                        ${
-                            topCustomers.length
-                                ? (() => {
-                                      const maxTotal = topCustomers[0].total || 1;
-                                      const fmtMoney = (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + 'tr' : v >= 1e3 ? Math.round(v / 1e3) + 'k' : v.toLocaleString('vi-VN');
-                                      const rankDefs = [
-                                          { title:'Đại Hiệp', color:'#FACC15', glow:'rgba(250,204,21,.45)', gf:'#FACC15', gt:'#F59E0B', badge:'👑', beast:'dragon' },
-                                          { title:'Hiệp Sĩ', color:'#F87171', glow:'rgba(168,85,247,.45)', gf:'#EF4444', gt:'#A855F7', badge:'⚔️',  beast:'phoenix' },
-                                          { title:'Kiếm Khách', color:'#60A5FA', glow:'rgba(59,130,246,.45)', gf:'#3B82F6', gt:'#06B6D4', badge:'⚡',  beast:'sword' },
-                                          { title:'Nghĩa Khách', color:'#4ADE80', glow:'rgba(34,197,94,.35)',  gf:'#22C55E', gt:'#10B981', badge:'💎',  beast:'' },
-                                          { title:'Nghĩa Khách', color:'#4ADE80', glow:'rgba(34,197,94,.35)',  gf:'#22C55E', gt:'#10B981', badge:'💎',  beast:'' },
-                                      ];
-                                      const steelDef = { title:'Lãng Khách', color:'#9CA3AF', glow:'rgba(156,163,175,.2)', gf:'#9CA3AF', gt:'#6B7280', badge:'', beast:'' };
-                                      return topCustomers.map((cust, index) => {
-                                          const rank = index + 1;
-                                          const def = rankDefs[index] || steelDef;
-                                          const pct = (cust.total / maxTotal) * 100;
-                                          const soldClass = rank === 1 ? 'wuxia-sold--1' : rank <= 3 ? 'wuxia-sold--2' : 'wuxia-sold--n';
-                                          const dragonSvg = def.beast === 'dragon' ? `<svg viewBox="0 0 382 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#451A03" stroke-width="32" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#92400E" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#D97706" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FDE68A" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#92400E" stroke-width="1.5" fill="none" opacity="0.6"><path d="M83,14 L87,24"/><path d="M98,14 L102,24"/><path d="M113,15 L117,25"/><path d="M152,46 L148,56"/><path d="M167,50 L163,60"/><path d="M178,50 L174,60"/><path d="M221,13 L225,23"/><path d="M236,13 L240,23"/><path d="M251,15 L255,25"/><path d="M288,42 L284,52"/><path d="M301,40 L297,50"/><path d="M314,22 L318,32"/></g><path d="M83,22 C81,30 79,37 77,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M83,22 C81,30 79,37 77,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M77,42 C75,46 73,47 73,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M87,42 C86,46 84,47 84,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M97,42 C99,46 101,47 101,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M214,42 C212,46 210,47 210,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M224,42 C223,46 221,47 221,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M234,42 C236,46 238,47 238,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M15,52 C10,46 7,38 9,30" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C10,46 7,38 9,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C8,58 5,64 7,70" stroke="#B45309" stroke-width="4" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.3;0.8;0.3" dur="1.8s" begin="0.4s" repeatCount="indefinite"/></path><path d="M348,14 C355,18 360,26 360,32" stroke="#92400E" stroke-width="18" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#D97706" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FDE68A" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FFFBEB" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#92400E" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#D97706" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#FEF3C7" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#78350F" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#B45309" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M374,26 L376,34" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M370,35 L372,27" stroke="#FEF3C7" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#B45309" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#FDE68A" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="363" cy="23" r="5" stroke="#92400E" stroke-width="2" fill="#D97706"/><circle cx="363" cy="23" r="2.8" fill="#1C1917"/><circle cx="361.5" cy="21" r="1.4" fill="white"/><circle cx="363" cy="23" r="5" stroke="#FDE68A" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;1;0.7" dur="2s" repeatCount="indefinite"/></circle><path d="M361,18 C359,12 356,6 354,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M361,18 C359,12 356,6 354,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#D97706" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#FEF3C7" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M356,30 C351,28 347,23 347,16" stroke="#D97706" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M356,36 C350,36 346,31 346,24" stroke="#B45309" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M376,25 C381,22 386,20 390,19" stroke="#FEF3C7" stroke-width="1.8" fill="none" stroke-linecap="round"/><path d="M376,26 C383,26 389,26 393,26" stroke="#FEF3C7" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M376,27 C381,30 386,32 390,33" stroke="#FEF3C7" stroke-width="1.4" fill="none" stroke-linecap="round" opacity="0.8"/><circle cx="344" cy="6" r="6" stroke="#FDE68A" stroke-width="2" fill="#FEF3C7"><animate attributeName="r" values="6;7;6" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;1;0.8" dur="1.6s" repeatCount="indefinite"/></circle><circle cx="342" cy="4" r="1.5" fill="white" opacity="0.9"/><circle cx="87" cy="4" r="2.5" fill="#FEF3C7"><animate attributeName="cy" values="4;-3;4" dur="3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="3s" repeatCount="indefinite"/></circle><circle cx="222" cy="4" r="2" fill="#FDE68A"><animate attributeName="cy" values="4;-3;4" dur="2.5s" begin="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="2.5s" begin="0.8s" repeatCount="indefinite"/></circle><circle cx="152" cy="62" r="1.8" fill="#D97706"><animate attributeName="cy" values="62;68;62" dur="2.2s" begin="1.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.6;0;0.6" dur="2.2s" begin="1.4s" repeatCount="indefinite"/></circle></svg>` : '';
-                                          const phoenixSvg = def.beast === 'phoenix' ? `<svg viewBox="0 0 280 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><g><animateTransform attributeName="transform" type="rotate" values="-6,100,38;-24,100,38;-6,100,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M94,39 C80,26 68,16 55,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M94,39 C80,26 68,16 55,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M82,40 C72,32 64,26 57,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M22,18 C16,22 10,28 8,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M8,32 C4,26 3,18 6,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M8,32 C4,26 3,18 6,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path></g><g><animateTransform attributeName="transform" type="rotate" values="6,180,38;24,180,38;6,180,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M186,39 C200,26 212,16 225,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M186,39 C200,26 212,16 225,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M198,40 C208,32 216,26 223,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M258,18 C264,22 270,28 272,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M272,32 C276,26 277,18 274,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path><path d="M272,32 C276,26 277,18 274,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path></g><ellipse cx="141" cy="41" rx="23" ry="15" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="ry" values="15;16.5;15" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FCA5A5" stroke-width="3" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FFF1F2" stroke-width="1" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><circle cx="140" cy="19" r="12" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FCA5A5" stroke-width="2.5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FFF1F2" stroke-width="0.8" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="133" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="133" cy="17" r="2.8" fill="#1C1917"/><circle cx="131.8" cy="15.5" r="1.2" fill="white"/><circle cx="133" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/></circle><circle cx="147" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="147" cy="17" r="2.8" fill="#1C1917"/><circle cx="145.8" cy="15.5" r="1.2" fill="white"/><circle cx="147" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="0.3s" repeatCount="indefinite"/></circle><path d="M137,27 L140,33 L143,27" stroke="#7F1D1D" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M137,27 L140,33 L143,27" stroke="#FCD34D" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M134,8 C132,3 130,-1 132,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#4C1D95" stroke-width="6" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#A855F7" stroke-width="3" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#F3E8FF" stroke-width="0.9" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><g><animateTransform attributeName="transform" type="rotate" values="-5,140,52;5,140,52;-5,140,52" dur="2s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M140,52 C138,61 136,68 134,72" stroke="#4C1D95" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#A855F7" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#F3E8FF" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C134,60 130,64 127,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M140,52 C146,60 150,64 153,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M134,72 C132,76 130,76 130,74" stroke="#FCD34D" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M129,70 C127,74 125,74 125,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.1s" begin="0.3s" repeatCount="indefinite"/></path><path d="M151,70 C153,74 155,74 155,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.0s" begin="0.6s" repeatCount="indefinite"/></path></g><circle cx="108" cy="28" r="2.5" fill="#FCD34D"><animate attributeName="cy" values="28;15;28" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0;0.9" dur="1.8s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="1.8s" repeatCount="indefinite"/></circle><circle cx="172" cy="26" r="2.2" fill="#EF4444"><animate attributeName="cy" values="26;13;26" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="r" values="2.2;0.4;2.2" dur="2.0s" begin="0.5s" repeatCount="indefinite"/></circle><circle cx="125" cy="30" r="1.8" fill="#FCA5A5"><animate attributeName="cy" values="30;17;30" dur="1.5s" begin="0.9s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.5s" begin="0.9s" repeatCount="indefinite"/></circle><circle cx="155" cy="28" r="2" fill="#A855F7"><animate attributeName="cy" values="28;15;28" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="2.2s" begin="0.3s" repeatCount="indefinite"/></circle></svg>` : '';
-                                          const swordSvg = def.beast === 'sword' ? `<svg viewBox="0 0 220 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#0C1445" stroke-width="32" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#1E3A8A" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#2563EB" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#60A5FA" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#EFF6FF" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#0F2D6E" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.7"><path d="M75,36 C74,44 74,52 75,58"/><path d="M92,34 C91,42 91,50 92,57"/><path d="M110,34 C109,42 109,50 110,56"/><path d="M128,34 C127,42 127,50 128,56"/><path d="M146,34 C145,41 145,49 146,55"/></g><g stroke="#93C5FD" stroke-width="1.2" fill="none" stroke-linecap="round" opacity="0.5"><path d="M77,37 C76,44 76,51 77,57"/><path d="M94,35 C93,42 93,49 94,55"/><path d="M112,35 C111,42 111,49 112,55"/></g><path d="M165,50 C167,56 168,62 168,66" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#3B82F6" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#1E3A8A" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#3B82F6" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M165,66 L163,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M168,66 L167,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M173,66 L172,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M176,66 L175,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#2563EB" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M55,68 L53,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,68 L57,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M61,68 L61,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#0F2D6E" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#1D4ED8" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#60A5FA" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#EFF6FF" stroke-width="1" fill="none" stroke-linecap="round"/><path d="M18,12 C20,8 22,6 20,10" stroke="#93C5FD" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#0C1445" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#1E3A8A" stroke-width="15" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#3B82F6" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#93C5FD" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#EFF6FF" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="192" cy="22" r="20" stroke="#0C1445" stroke-width="6" fill="none"/><circle cx="192" cy="22" r="20" stroke="#1E3A8A" stroke-width="14" fill="none"/><circle cx="192" cy="22" r="20" stroke="#2563EB" stroke-width="8" fill="none"/><circle cx="192" cy="22" r="20" stroke="#60A5FA" stroke-width="4" fill="none"/><circle cx="192" cy="22" r="20" stroke="#EFF6FF" stroke-width="1.2" fill="none"/><path d="M177,10 L172,0 L182,8Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M177,10 L173,3 L181,8Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><path d="M200,8 L204,0 L210,10Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M201,9 L205,2 L208,9Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><g stroke="#0F2D6E" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.65"><path d="M180,12 C181,18 181,24 179,30"/><path d="M190,10 C191,16 191,22 190,29"/><path d="M200,12 C201,18 200,24 198,30"/></g><path d="M181,14 L185,9 L189,14 L193,9 L197,14" stroke="#BFDBFE" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/><circle cx="182" cy="22" r="6" stroke="#0C1445" stroke-width="2" fill="#1D4ED8"/><circle cx="182" cy="22" r="4" fill="#0F172A"/><circle cx="182" cy="22" r="2" fill="#60A5FA"/><circle cx="180.5" cy="20" r="1.3" fill="white"/><circle cx="182" cy="22" r="7" stroke="#60A5FA" stroke-width="0.9" fill="none"><animate attributeName="r" values="7;9;7" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;0.9;0.5" dur="2s" repeatCount="indefinite"/></circle><ellipse cx="206" cy="24" rx="4" ry="3" stroke="#1E3A8A" stroke-width="2" fill="#0F2D6E"/><ellipse cx="205" cy="23" rx="1.5" ry="1" fill="#BFDBFE" opacity="0.7"/><path d="M204,22 C210,20 216,18 220,17" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,24 C211,24 217,24 221,24" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,26 C210,28 216,30 220,31" stroke="#DBEAFE" stroke-width="1.3" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#1E3A8A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#60A5FA" stroke-width="0.7" fill="none" stroke-linecap="round"/><path d="M110,16 L115,24 L109,23 L114,32" stroke="#BFDBFE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M110,16 L115,24 L109,23 L114,32" stroke="white" stroke-width="0.7" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M84,14 L88,22 L82,21 L87,30" stroke="#93C5FD" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="2.0s" begin="0.4s" repeatCount="indefinite"/></path><path d="M138,12 L142,20 L136,19 L141,28" stroke="#BFDBFE" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="1.8s" begin="0.7s" repeatCount="indefinite"/></path><circle cx="85" cy="22" r="2.5" fill="#93C5FD"><animate attributeName="cy" values="22;12;22" dur="2.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="2.2s" repeatCount="indefinite"/></circle><circle cx="120" cy="18" r="2" fill="#60A5FA"><animate attributeName="cy" values="18;8;18" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="1.9s" begin="0.6s" repeatCount="indefinite"/></circle><circle cx="150" cy="16" r="1.6" fill="#BFDBFE"><animate attributeName="cy" values="16;6;16" dur="1.7s" begin="1.1s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.7s" begin="1.1s" repeatCount="indefinite"/></circle></svg>` : '';
-                                          return `
+                        ${topCustomers.length
+                ? (() => {
+                    const maxTotal = topCustomers[0].total || 1;
+                    const fmtMoney = (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + 'tr' : v >= 1e3 ? Math.round(v / 1e3) + 'k' : v.toLocaleString('vi-VN');
+                    const rankDefs = [
+                        { title: 'Đại Hiệp', color: '#FACC15', glow: 'rgba(250,204,21,.45)', gf: '#FACC15', gt: '#F59E0B', badge: '👑', beast: 'dragon' },
+                        { title: 'Hiệp Sĩ', color: '#F87171', glow: 'rgba(168,85,247,.45)', gf: '#EF4444', gt: '#A855F7', badge: '⚔️', beast: 'phoenix' },
+                        { title: 'Kiếm Khách', color: '#60A5FA', glow: 'rgba(59,130,246,.45)', gf: '#3B82F6', gt: '#06B6D4', badge: '⚡', beast: 'sword' },
+                        { title: 'Nghĩa Khách', color: '#4ADE80', glow: 'rgba(34,197,94,.35)', gf: '#22C55E', gt: '#10B981', badge: '💎', beast: '' },
+                        { title: 'Nghĩa Khách', color: '#4ADE80', glow: 'rgba(34,197,94,.35)', gf: '#22C55E', gt: '#10B981', badge: '💎', beast: '' },
+                    ];
+                    const steelDef = { title: 'Lãng Khách', color: '#9CA3AF', glow: 'rgba(156,163,175,.2)', gf: '#9CA3AF', gt: '#6B7280', badge: '', beast: '' };
+                    return topCustomers.map((cust, index) => {
+                        const rank = index + 1;
+                        const def = rankDefs[index] || steelDef;
+                        const pct = (cust.total / maxTotal) * 100;
+                        const soldClass = rank === 1 ? 'wuxia-sold--1' : rank <= 3 ? 'wuxia-sold--2' : 'wuxia-sold--n';
+                        const dragonSvg = def.beast === 'dragon' ? `<svg viewBox="0 0 382 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#451A03" stroke-width="32" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#92400E" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#D97706" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FDE68A" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M15,52 C38,52 60,8 85,10 C110,12 128,52 152,54 C176,56 198,10 222,10 C246,10 266,52 288,50 C310,48 330,10 348,14" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#92400E" stroke-width="1.5" fill="none" opacity="0.6"><path d="M83,14 L87,24"/><path d="M98,14 L102,24"/><path d="M113,15 L117,25"/><path d="M152,46 L148,56"/><path d="M167,50 L163,60"/><path d="M178,50 L174,60"/><path d="M221,13 L225,23"/><path d="M236,13 L240,23"/><path d="M251,15 L255,25"/><path d="M288,42 L284,52"/><path d="M301,40 L297,50"/><path d="M314,22 L318,32"/></g><path d="M83,22 C81,30 79,37 77,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M83,22 C81,30 79,37 77,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M87,21 C87,29 87,37 87,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M91,22 C93,30 95,37 97,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M77,42 C75,46 73,47 73,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M87,42 C86,46 84,47 84,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M97,42 C99,46 101,47 101,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#D97706" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M220,22 C218,30 216,37 214,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M224,21 C224,29 224,37 224,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M228,22 C230,30 232,37 234,42" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M214,42 C212,46 210,47 210,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M224,42 C223,46 221,47 221,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M234,42 C236,46 238,47 238,45" stroke="#FFFBEB" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M15,52 C10,46 7,38 9,30" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C10,46 7,38 9,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/></path><path d="M15,52 C8,58 5,64 7,70" stroke="#B45309" stroke-width="4" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.3;0.8;0.3" dur="1.8s" begin="0.4s" repeatCount="indefinite"/></path><path d="M348,14 C355,18 360,26 360,32" stroke="#92400E" stroke-width="18" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#D97706" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FDE68A" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M348,14 C355,18 360,26 360,32" stroke="#FFFBEB" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#92400E" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#D97706" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M360,27 C366,25 372,25 376,25 C378,25 380,27 380,30" stroke="#FEF3C7" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#78350F" stroke-width="11" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#B45309" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M360,34 C366,36 372,37 376,36 C378,35 380,33 380,30" stroke="#FDE68A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M374,26 L376,34" stroke="#FFFBEB" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M370,35 L372,27" stroke="#FEF3C7" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#B45309" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M358,22 C360,16 366,15 368,18" stroke="#FDE68A" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="363" cy="23" r="5" stroke="#92400E" stroke-width="2" fill="#D97706"/><circle cx="363" cy="23" r="2.8" fill="#1C1917"/><circle cx="361.5" cy="21" r="1.4" fill="white"/><circle cx="363" cy="23" r="5" stroke="#FDE68A" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;1;0.7" dur="2s" repeatCount="indefinite"/></circle><path d="M361,18 C359,12 356,6 354,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M361,18 C359,12 356,6 354,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#D97706" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M357,10 C354,7 350,6 349,9" stroke="#FEF3C7" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#D97706" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M365,18 C366,12 368,6 370,2" stroke="#FEF3C7" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M356,30 C351,28 347,23 347,16" stroke="#D97706" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M356,36 C350,36 346,31 346,24" stroke="#B45309" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M376,25 C381,22 386,20 390,19" stroke="#FEF3C7" stroke-width="1.8" fill="none" stroke-linecap="round"/><path d="M376,26 C383,26 389,26 393,26" stroke="#FEF3C7" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M376,27 C381,30 386,32 390,33" stroke="#FEF3C7" stroke-width="1.4" fill="none" stroke-linecap="round" opacity="0.8"/><circle cx="344" cy="6" r="6" stroke="#FDE68A" stroke-width="2" fill="#FEF3C7"><animate attributeName="r" values="6;7;6" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;1;0.8" dur="1.6s" repeatCount="indefinite"/></circle><circle cx="342" cy="4" r="1.5" fill="white" opacity="0.9"/><circle cx="87" cy="4" r="2.5" fill="#FEF3C7"><animate attributeName="cy" values="4;-3;4" dur="3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="3s" repeatCount="indefinite"/></circle><circle cx="222" cy="4" r="2" fill="#FDE68A"><animate attributeName="cy" values="4;-3;4" dur="2.5s" begin="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="2.5s" begin="0.8s" repeatCount="indefinite"/></circle><circle cx="152" cy="62" r="1.8" fill="#D97706"><animate attributeName="cy" values="62;68;62" dur="2.2s" begin="1.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.6;0;0.6" dur="2.2s" begin="1.4s" repeatCount="indefinite"/></circle></svg>` : '';
+                        const phoenixSvg = def.beast === 'phoenix' ? `<svg viewBox="0 0 280 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><g><animateTransform attributeName="transform" type="rotate" values="-6,100,38;-24,100,38;-6,100,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M100,38 C82,26 60,14 38,14 C24,14 12,22 8,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M100,42 C80,34 58,24 36,25 C24,25 14,30 10,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M94,39 C80,26 68,16 55,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M94,39 C80,26 68,16 55,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M88,39 C76,28 65,20 55,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M82,40 C72,32 64,26 57,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M22,18 C16,22 10,28 8,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M22,18 C16,22 10,28 8,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M8,32 C4,26 3,18 6,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M8,32 C4,26 3,18 6,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" repeatCount="indefinite"/></path></g><g><animateTransform attributeName="transform" type="rotate" values="6,180,38;24,180,38;6,180,38" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#450A0A" stroke-width="28" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#7F1D1D" stroke-width="20" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#DC2626" stroke-width="12" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FCA5A5" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M180,38 C198,26 220,14 242,14 C256,14 268,22 272,32" stroke="#FFF1F2" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#7F1D1D" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#EF4444" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M180,42 C200,34 222,24 244,25 C256,25 266,30 270,40" stroke="#FECACA" stroke-width="2.5" fill="none" stroke-linecap="round"/><path d="M186,39 C200,26 212,16 225,14" stroke="#EF4444" stroke-width="7" fill="none"/><path d="M186,39 C200,26 212,16 225,14" stroke="#FECACA" stroke-width="2" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#DC2626" stroke-width="6" fill="none"/><path d="M192,39 C204,28 215,20 225,20" stroke="#FCA5A5" stroke-width="1.5" fill="none"/><path d="M198,40 C208,32 216,26 223,26" stroke="#B91C1C" stroke-width="5" fill="none"/><path d="M258,18 C264,22 270,28 272,32" stroke="#4C1D95" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#A855F7" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M258,18 C264,22 270,28 272,32" stroke="#F3E8FF" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M272,32 C276,26 277,18 274,12" stroke="#FCD34D" stroke-width="3.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path><path d="M272,32 C276,26 277,18 274,12" stroke="#FFFBEB" stroke-width="1.2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;1;0.4" dur="0.9s" begin="0.2s" repeatCount="indefinite"/></path></g><ellipse cx="141" cy="41" rx="23" ry="15" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="ry" values="15;16.5;15" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FCA5A5" stroke-width="3" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><ellipse cx="140" cy="40" rx="22" ry="14" stroke="#FFF1F2" stroke-width="1" fill="none"><animate attributeName="ry" values="14;15.5;14" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></ellipse><circle cx="140" cy="19" r="12" stroke="#450A0A" stroke-width="5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#7F1D1D" stroke-width="10" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#DC2626" stroke-width="6" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FCA5A5" stroke-width="2.5" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="140" cy="19" r="12" stroke="#FFF1F2" stroke-width="0.8" fill="none"><animate attributeName="r" values="12;12.8;12" dur="1.4s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/></circle><circle cx="133" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="133" cy="17" r="2.8" fill="#1C1917"/><circle cx="131.8" cy="15.5" r="1.2" fill="white"/><circle cx="133" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/></circle><circle cx="147" cy="17" r="4.5" stroke="#450A0A" stroke-width="2" fill="#B91C1C"/><circle cx="147" cy="17" r="2.8" fill="#1C1917"/><circle cx="145.8" cy="15.5" r="1.2" fill="white"/><circle cx="147" cy="17" r="5" stroke="#FCA5A5" stroke-width="0.8" fill="none"><animate attributeName="r" values="5;6.5;5" dur="2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="0.3s" repeatCount="indefinite"/></circle><path d="M137,27 L140,33 L143,27" stroke="#7F1D1D" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M137,27 L140,33 L143,27" stroke="#FCD34D" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M134,8 C132,3 130,-1 132,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M134,8 C132,3 130,-1 132,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.9s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#4C1D95" stroke-width="6" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#A855F7" stroke-width="3" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M140,7 C140,2 140,-2 140,-6" stroke="#F3E8FF" stroke-width="0.9" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="0.7s" begin="0.15s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#7F1D1D" stroke-width="5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#EF4444" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><path d="M146,8 C148,3 150,-1 148,-5" stroke="#FFF1F2" stroke-width="0.8" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.6;1;0.6" dur="1.0s" begin="0.1s" repeatCount="indefinite"/></path><g><animateTransform attributeName="transform" type="rotate" values="-5,140,52;5,140,52;-5,140,52" dur="2s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45,0,0.55,1 0.45,0,0.55,1"/><path d="M140,52 C138,61 136,68 134,72" stroke="#4C1D95" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#A855F7" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M140,52 C138,61 136,68 134,72" stroke="#F3E8FF" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C136,61 132,66 129,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#7F1D1D" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#DC2626" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M140,52 C144,61 148,66 151,70" stroke="#FFF1F2" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M140,52 C134,60 130,64 127,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M140,52 C146,60 150,64 153,67" stroke="#B91C1C" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M134,72 C132,76 130,76 130,74" stroke="#FCD34D" stroke-width="2.5" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="0.9s" repeatCount="indefinite"/></path><path d="M129,70 C127,74 125,74 125,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.1s" begin="0.3s" repeatCount="indefinite"/></path><path d="M151,70 C153,74 155,74 155,72" stroke="#FCD34D" stroke-width="2" fill="none" stroke-linecap="round"><animate attributeName="opacity" values="0.4;0.9;0.4" dur="1.0s" begin="0.6s" repeatCount="indefinite"/></path></g><circle cx="108" cy="28" r="2.5" fill="#FCD34D"><animate attributeName="cy" values="28;15;28" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0;0.9" dur="1.8s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="1.8s" repeatCount="indefinite"/></circle><circle cx="172" cy="26" r="2.2" fill="#EF4444"><animate attributeName="cy" values="26;13;26" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.0s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="r" values="2.2;0.4;2.2" dur="2.0s" begin="0.5s" repeatCount="indefinite"/></circle><circle cx="125" cy="30" r="1.8" fill="#FCA5A5"><animate attributeName="cy" values="30;17;30" dur="1.5s" begin="0.9s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.5s" begin="0.9s" repeatCount="indefinite"/></circle><circle cx="155" cy="28" r="2" fill="#A855F7"><animate attributeName="cy" values="28;15;28" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" begin="0.3s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="2.2s" begin="0.3s" repeatCount="indefinite"/></circle></svg>` : '';
+                        const swordSvg = def.beast === 'sword' ? `<svg viewBox="0 0 220 72" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#0C1445" stroke-width="32" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#1E3A8A" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#2563EB" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#60A5FA" stroke-width="7" fill="none" stroke-linecap="round"/><path d="M55,50 C78,50 110,38 135,36 C155,34 168,38 172,44" stroke="#EFF6FF" stroke-width="2.5" fill="none" stroke-linecap="round"/><g stroke="#0F2D6E" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.7"><path d="M75,36 C74,44 74,52 75,58"/><path d="M92,34 C91,42 91,50 92,57"/><path d="M110,34 C109,42 109,50 110,56"/><path d="M128,34 C127,42 127,50 128,56"/><path d="M146,34 C145,41 145,49 146,55"/></g><g stroke="#93C5FD" stroke-width="1.2" fill="none" stroke-linecap="round" opacity="0.5"><path d="M77,37 C76,44 76,51 77,57"/><path d="M94,35 C93,42 93,49 94,55"/><path d="M112,35 C111,42 111,49 112,55"/></g><path d="M165,50 C167,56 168,62 168,66" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#3B82F6" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M165,50 C167,56 168,62 168,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#1E3A8A" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#3B82F6" stroke-width="4.5" fill="none" stroke-linecap="round"/><path d="M172,50 C173,56 173,62 173,66" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M165,66 L163,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M168,66 L167,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M173,66 L172,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M176,66 L175,70" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#1E3A8A" stroke-width="10" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#2563EB" stroke-width="5" fill="none" stroke-linecap="round"/><path d="M58,52 C56,58 55,64 55,68" stroke="#BFDBFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M55,68 L53,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M58,68 L57,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M61,68 L61,72" stroke="#DBEAFE" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#0F2D6E" stroke-width="14" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#1D4ED8" stroke-width="8" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#60A5FA" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M55,50 C42,46 30,40 22,32 C16,26 15,18 18,12" stroke="#EFF6FF" stroke-width="1" fill="none" stroke-linecap="round"/><path d="M18,12 C20,8 22,6 20,10" stroke="#93C5FD" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#0C1445" stroke-width="22" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#1E3A8A" stroke-width="15" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#3B82F6" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#93C5FD" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M172,44 C178,38 182,30 184,26" stroke="#EFF6FF" stroke-width="1.2" fill="none" stroke-linecap="round"/><circle cx="192" cy="22" r="20" stroke="#0C1445" stroke-width="6" fill="none"/><circle cx="192" cy="22" r="20" stroke="#1E3A8A" stroke-width="14" fill="none"/><circle cx="192" cy="22" r="20" stroke="#2563EB" stroke-width="8" fill="none"/><circle cx="192" cy="22" r="20" stroke="#60A5FA" stroke-width="4" fill="none"/><circle cx="192" cy="22" r="20" stroke="#EFF6FF" stroke-width="1.2" fill="none"/><path d="M177,10 L172,0 L182,8Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M177,10 L173,3 L181,8Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><path d="M200,8 L204,0 L210,10Z" stroke="#1E3A8A" stroke-width="3" fill="#0F2D6E"/><path d="M201,9 L205,2 L208,9Z" stroke="#60A5FA" stroke-width="1" fill="#1D4ED8"/><g stroke="#0F2D6E" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.65"><path d="M180,12 C181,18 181,24 179,30"/><path d="M190,10 C191,16 191,22 190,29"/><path d="M200,12 C201,18 200,24 198,30"/></g><path d="M181,14 L185,9 L189,14 L193,9 L197,14" stroke="#BFDBFE" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/><circle cx="182" cy="22" r="6" stroke="#0C1445" stroke-width="2" fill="#1D4ED8"/><circle cx="182" cy="22" r="4" fill="#0F172A"/><circle cx="182" cy="22" r="2" fill="#60A5FA"/><circle cx="180.5" cy="20" r="1.3" fill="white"/><circle cx="182" cy="22" r="7" stroke="#60A5FA" stroke-width="0.9" fill="none"><animate attributeName="r" values="7;9;7" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.5;0.9;0.5" dur="2s" repeatCount="indefinite"/></circle><ellipse cx="206" cy="24" rx="4" ry="3" stroke="#1E3A8A" stroke-width="2" fill="#0F2D6E"/><ellipse cx="205" cy="23" rx="1.5" ry="1" fill="#BFDBFE" opacity="0.7"/><path d="M204,22 C210,20 216,18 220,17" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,24 C211,24 217,24 221,24" stroke="#DBEAFE" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M204,26 C210,28 216,30 220,31" stroke="#DBEAFE" stroke-width="1.3" fill="none" stroke-linecap="round" opacity="0.8"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#1E3A8A" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M206,29 C204,33 202,34 206,34 C210,34 208,33 206,29" stroke="#60A5FA" stroke-width="0.7" fill="none" stroke-linecap="round"/><path d="M110,16 L115,24 L109,23 L114,32" stroke="#BFDBFE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M110,16 L115,24 L109,23 L114,32" stroke="white" stroke-width="0.7" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.2;1;0.3;0.8;0.2" dur="1.5s" repeatCount="indefinite"/></path><path d="M84,14 L88,22 L82,21 L87,30" stroke="#93C5FD" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="2.0s" begin="0.4s" repeatCount="indefinite"/></path><path d="M138,12 L142,20 L136,19 L141,28" stroke="#BFDBFE" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"><animate attributeName="opacity" values="0.1;0.9;0.2;0.7;0.1" dur="1.8s" begin="0.7s" repeatCount="indefinite"/></path><circle cx="85" cy="22" r="2.5" fill="#93C5FD"><animate attributeName="cy" values="22;12;22" dur="2.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.2s" repeatCount="indefinite"/><animate attributeName="r" values="2.5;0.5;2.5" dur="2.2s" repeatCount="indefinite"/></circle><circle cx="120" cy="18" r="2" fill="#60A5FA"><animate attributeName="cy" values="18;8;18" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.9s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="r" values="2;0.4;2" dur="1.9s" begin="0.6s" repeatCount="indefinite"/></circle><circle cx="150" cy="16" r="1.6" fill="#BFDBFE"><animate attributeName="cy" values="16;6;16" dur="1.7s" begin="1.1s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="1.7s" begin="1.1s" repeatCount="indefinite"/></circle></svg>` : '';
+                        return `
                                     <div class="wuxia-row" style="--wr-color:${def.color};--wr-glow:${def.glow};--wr-gf:${def.gf};--wr-gt:${def.gt}">
                                         ${def.beast ? `<div class="wuxia-beast wuxia-beast--${def.beast}">${dragonSvg}${phoenixSvg}${swordSvg}</div>` : ''}
                                         <div class="wuxia-row-inner">
@@ -8688,10 +8707,10 @@ class HamobileBanhang {
                                             <div class="wuxia-fill" style="width:${pct.toFixed(1)}%"><div class="wuxia-shine"></div></div>
                                         </div>
                                     </div>`;
-                                      }).join('');
-                                  })()
-                                : '<p class="wuxia-empty">Chưa có khách hàng có tên trong kỳ.</p>'
-                        }
+                    }).join('');
+                })()
+                : '<p class="wuxia-empty">Chưa có khách hàng có tên trong kỳ.</p>'
+            }
                         <div class="wuxia-ambient-bot" aria-hidden="true"></div>
                     </div>
                 </div>
@@ -8815,7 +8834,7 @@ class HamobileBanhang {
                                 </div>
                             </div>
                             <div class="wxk-al${totalDebt > 0 ? ' wxk-al--warm' : ' wxk-al--ok'}">
-                                <div class="wxk-anum ${totalDebt > 0 ? 'wxk-anum--warm' : 'wxk-anum--ok'}">${totalDebt >= 1000000 ? (totalDebt/1000000).toFixed(1).replace(/\.?0+$/,'')+'M' : totalDebt > 0 ? totalDebt.toLocaleString('vi-VN') : '0'}</div>
+                                <div class="wxk-anum ${totalDebt > 0 ? 'wxk-anum--warm' : 'wxk-anum--ok'}">${totalDebt >= 1000000 ? (totalDebt / 1000000).toFixed(1).replace(/\.?0+$/, '') + 'M' : totalDebt > 0 ? totalDebt.toLocaleString('vi-VN') : '0'}</div>
                                 <div class="wxk-ai">
                                     <span class="wxk-al-lbl">Công nợ tổng KH</span>
                                     <span class="wxk-al-sub">${debtCustomerCount} khách · đơn hàng + SC</span>
@@ -8873,7 +8892,7 @@ class HamobileBanhang {
         this._trendCacheHtml = _trendHtml;
         return _trendHtml;
     }
-    
+
     getCompanyInfoContent() {
         // Get company settings from Firebase
         const companySettings = this.getCompanySettings();
@@ -8886,7 +8905,7 @@ class HamobileBanhang {
         if (companySettings.qrCode) {
             console.log('QR data length:', companySettings.qrCode.length);
         }
-        
+
         return `
             <div class="fade-in">
                 <!-- Company Information Settings -->
@@ -8984,11 +9003,11 @@ class HamobileBanhang {
             const lastBackupTime = window.FirebaseStorage.getMeta('last_backup_time');
             const autoBackupEnabled = window.FirebaseStorage.getMeta('auto_backup_enabled') !== 'false';
             const backupInterval = window.FirebaseStorage.getMeta('backup_interval') || '15';
-            const lastBackupStr = lastBackupTime ? (() => { try { return new Date(lastBackupTime).toLocaleString('vi-VN'); } catch(e) { return 'Chưa có'; } })() : 'Chưa có';
+            const lastBackupStr = lastBackupTime ? (() => { try { return new Date(lastBackupTime).toLocaleString('vi-VN'); } catch (e) { return 'Chưa có'; } })() : 'Chưa có';
             const lastSync = window.FirebaseStorage.getMeta('last_sync');
-            const lastSyncStr = lastSync ? (() => { try { return new Date(lastSync).toLocaleString('vi-VN'); } catch(e) { return ''; } })() : '';
-            
-        return `
+            const lastSyncStr = lastSync ? (() => { try { return new Date(lastSync).toLocaleString('vi-VN'); } catch (e) { return ''; } })() : '';
+
+            return `
             <div class="fade-in">
                 <div class="quick-actions" style="margin-bottom: 24px;">
                     <h2 class="section-title">⚙️ Cài đặt Sao lưu</h2>
@@ -9054,7 +9073,42 @@ class HamobileBanhang {
                         <span id="firebase-sync-status">${lastSyncStr ? 'Đồng bộ lúc: ' + lastSyncStr : 'Đang chờ đồng bộ'}</span>
                     </div>
                 </div>
-                
+
+                ${window.HaSecondaryBackup && window.HaSecondaryBackup.isSupported() ? `
+                <div class="quick-actions" style="margin-bottom: 24px;">
+                    <h2 class="section-title">💽 Backup ổ đĩa dự phòng</h2>
+                    <div style="background: white; padding: 20px; border-radius: 12px; border: 2px solid ${window.HaSecondaryBackup.isEnabled() ? '#10b981' : '#e5e7eb'};">
+                        <p style="margin: 0 0 12px; color: #6b7280; font-size: 13px; line-height: 1.6;">
+                            Tự động lưu file <code>hangho_pos_data.json</code> ra ổ D, E, USB sau mỗi lần lưu dữ liệu.
+                            Khi ổ C hỏng, mở app → dữ liệu tự phục hồi từ ổ phụ.
+                        </p>
+                        <div id="secondary-backup-status" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;
+                            background: ${window.HaSecondaryBackup.isEnabled() ? '#ecfdf5' : '#f9fafb'};
+                            color: ${window.HaSecondaryBackup.isEnabled() ? '#065f46' : '#6b7280'};
+                            border: 1px solid ${window.HaSecondaryBackup.isEnabled() ? '#6ee7b7' : '#e5e7eb'};">
+                            ${window.HaSecondaryBackup.isEnabled()
+                        ? '✅ Đang backup ra: <strong>' + window.HaSecondaryBackup.getLabel() + '</strong>'
+                        : '⚪ Chưa cấu hình ổ phụ'}
+                        </div>
+                        <div id="secondary-backup-actions" style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <button type="button" onclick="app.pickSecondaryDrive()"
+                                style="flex: 1; min-width: 160px; padding: 10px 16px; background: linear-gradient(135deg,#047857,#10b981);
+                                       color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px;">
+                                📂 ${window.HaSecondaryBackup.isEnabled() ? 'Đổi thư mục' : 'Chọn ổ / thư mục'}
+                            </button>
+                            ${window.HaSecondaryBackup.isEnabled() ? `
+                            <button type="button" onclick="app.clearSecondaryDrive()"
+                                style="padding: 10px 16px; border: 1px solid #ef4444; color: #ef4444; background: white;
+                                       border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px;">
+                                🗑️ Tắt backup ổ phụ
+                            </button>` : ''}
+                        </div>
+                        <p style="margin: 12px 0 0; font-size: 11px; color: #9ca3af;">
+                            * Chỉ hoạt động trên Chrome / Edge. Firefox chưa hỗ trợ File System Access API.
+                        </p>
+                    </div>
+                </div>` : ''}
+
                 <div class="quick-actions">
                     <h2 class="section-title">📊 Thông tin Hệ thống</h2>
                     <div class="stats-grid" style="margin-bottom: 20px;">
@@ -9064,7 +9118,7 @@ class HamobileBanhang {
                                 <span class="stat-icon">💾</span>
                             </div>
                             <div class="stat-value" id="storage-size">${this.calculateStorageSize()}</div>
-                            <div class="stat-change">Đám mây</div>
+                            <div class="stat-change">💻 Máy tính (offline)</div>
                         </div>
                         
                         <div class="stat-card success">
@@ -9124,6 +9178,9 @@ class HamobileBanhang {
                         ${this.getSystemActivityHistory()}
                     </div>
                 </div>
+
+                <!-- Thông tin bản quyền -->
+                ${this.getLicenseSettingsBlock()}
             </div>
         `;
         } catch (err) {
@@ -9131,7 +9188,64 @@ class HamobileBanhang {
             return `<div class="quick-actions" style="padding: 24px;"><h2 class="section-title">⚙️ Cài đặt</h2><p style="color: #dc2626;">Đã xảy ra lỗi khi tải trang cài đặt: ${escapeHtml((err && err.message) || 'Lỗi không xác định')}</p><button onclick="app.loadPage('settings')" style="margin-top: 16px; padding: 10px 20px; background: var(--primary-green); color: white; border: none; border-radius: 8px; cursor: pointer;">Thử lại</button></div>`;
         }
     }
-    
+
+    getLicenseSettingsBlock() {
+        try {
+            const st = window.__licenseStatus;
+            const isTauri = typeof window.__TAURI_INTERNALS__ !== 'undefined' ||
+                typeof window.__TAURI__ !== 'undefined';
+            if (!isTauri) return ''; // not in Tauri — skip block
+
+            let statusHtml = '';
+            if (!st) {
+                statusHtml = '<p style="color:#94a3b8;font-size:13px;">Đang kiểm tra…</p>';
+            } else {
+                const edColors = { PRO: '#7c3aed', LIFETIME: '#b45309', BASIC: '#0369a1', FREE: '#6b7280' };
+                const statusMap = {
+                    Active: { icon: '✅', label: 'Đã kích hoạt', color: '#059669' },
+                    Trial: { icon: '⏰', label: 'Dùng thử', color: '#d97706' },
+                    TrialExpired: { icon: '❌', label: 'Dùng thử hết hạn', color: '#dc2626' },
+                    Expired: { icon: '📅', label: 'Hết hạn', color: '#dc2626' },
+                    Unlicensed: { icon: '🔒', label: 'Chưa kích hoạt', color: '#dc2626' },
+                    TimeManipulation: { icon: '⚠️', label: 'Cảnh báo đồng hồ', color: '#d97706' },
+                };
+                const s = statusMap[st.status] || { icon: '❓', label: st.status, color: '#6b7280' };
+                const edColor = edColors[st.edition] || '#6b7280';
+                statusHtml = `
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+                        <span style="font-size:22px;">${s.icon}</span>
+                        <div>
+                            <div style="font-weight:700;font-size:14px;color:${s.color};">${s.label}</div>
+                            ${st.edition ? `<div style="font-size:12px;color:#64748b;">Gói: <strong style="color:${edColor};">${st.edition}</strong></div>` : ''}
+                        </div>
+                    </div>
+                    <div style="font-size:12px;color:#475569;background:#f8fafc;border-radius:8px;padding:10px 12px;font-family:monospace;line-height:1.8;">
+                        ${st.machine_id ? `Mã máy  : <strong>${st.machine_id}</strong><br>` : ''}
+                        ${st.expiry_str ? `Hạn dùng: <strong>${st.expiry_str}</strong><br>` : ''}
+                        ${st.days_left !== null && st.days_left !== undefined ? `Còn lại : <strong>${st.days_left} ngày</strong>` : ''}
+                    </div>`;
+            }
+
+            return `
+                <div class="quick-actions" style="margin-top: 24px;">
+                    <h2 class="section-title">🔑 Bản quyền phần mềm</h2>
+                    <div style="background: white; border-radius: 12px; border: 2px solid #e5e7eb; padding: 20px;">
+                        ${statusHtml}
+                        <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;">
+                            <button onclick="window.lgShowActivation&&window.lgShowActivation()" style="padding:9px 18px;background:#7c3aed;color:#fff;border:none;border-radius:9px;font-weight:600;cursor:pointer;font-size:13px;">
+                                🔑 Nhập / đổi license key
+                            </button>
+                            <button onclick="app.loadPage('settings')" style="padding:9px 18px;background:#f1f5f9;color:#334155;border:1.5px solid #cbd5e1;border-radius:9px;font-weight:600;cursor:pointer;font-size:13px;">
+                                🔄 Làm mới
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+        } catch (e) {
+            return '';
+        }
+    }
+
     sanitizeLegacyVendorNameInText(s) {
         if (s == null || typeof s !== 'string') return s;
         return s.replace(/Phuoc\s*I\s*T/gi, 'Hangho.com');
@@ -9140,34 +9254,34 @@ class HamobileBanhang {
         try {
             let activities = window.FirebaseStorage.getMeta('system_activity_history') || [];
             if (!Array.isArray(activities)) activities = [];
-        var metaDirty = false;
-        for (var ai = 0; ai < activities.length; ai++) {
-            var act = activities[ai];
-            if (!act || typeof act !== 'object') continue;
-            var nt = this.sanitizeLegacyVendorNameInText(act.title);
-            var nd = this.sanitizeLegacyVendorNameInText(act.description);
-            if (nt !== act.title) { act.title = nt; metaDirty = true; }
-            if (nd !== act.description) { act.description = nd; metaDirty = true; }
-        }
-        if (metaDirty) {
-            window.FirebaseStorage.setMeta('system_activity_history', activities);
-            window.FirebaseStorage.save({ meta: { system_activity_history: activities } }).catch(function() {});
-        }
-        if (activities.length === 0) {
-            activities = this.generateInitialActivityHistory();
-            if (Array.isArray(activities)) {
-                window.FirebaseStorage.setMeta('system_activity_history', activities);
-                window.FirebaseStorage.save({ meta: { system_activity_history: activities } });
+            var metaDirty = false;
+            for (var ai = 0; ai < activities.length; ai++) {
+                var act = activities[ai];
+                if (!act || typeof act !== 'object') continue;
+                var nt = this.sanitizeLegacyVendorNameInText(act.title);
+                var nd = this.sanitizeLegacyVendorNameInText(act.description);
+                if (nt !== act.title) { act.title = nt; metaDirty = true; }
+                if (nd !== act.description) { act.description = nd; metaDirty = true; }
             }
-        }
-        
-        // Sắp xếp theo thời gian mới nhất
-        activities.sort((a, b) => new Date(b.time) - new Date(a.time));
-        
-        // Hiển thị 20 hoạt động gần nhất
-        const recentActivities = activities.slice(0, 20);
-        
-        let html = `
+            if (metaDirty) {
+                window.FirebaseStorage.setMeta('system_activity_history', activities);
+                window.FirebaseStorage.save({ meta: { system_activity_history: activities } }).catch(function () { });
+            }
+            if (activities.length === 0) {
+                activities = this.generateInitialActivityHistory();
+                if (Array.isArray(activities)) {
+                    window.FirebaseStorage.setMeta('system_activity_history', activities);
+                    window.FirebaseStorage.save({ meta: { system_activity_history: activities } });
+                }
+            }
+
+            // Sắp xếp theo thời gian mới nhất
+            activities.sort((a, b) => new Date(b.time) - new Date(a.time));
+
+            // Hiển thị 20 hoạt động gần nhất
+            const recentActivities = activities.slice(0, 20);
+
+            let html = `
             <div style="margin-bottom: 16px;">
                 <h3 style="margin: 0; display: flex; align-items: center; gap: 8px;">
                     <span>🕒</span> Lịch sử Hoạt động Gần đây
@@ -9176,25 +9290,25 @@ class HamobileBanhang {
             
             <div style="max-height: 400px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb;">
         `;
-        
-        if (recentActivities.length === 0) {
-            html += `
+
+            if (recentActivities.length === 0) {
+                html += `
                 <div style="padding: 40px; text-align: center; color: #6b7280;">
                     <div style="font-size: 48px; margin-bottom: 16px;">📝</div>
                     <p>Chưa có hoạt động nào được ghi nhận</p>
                 </div>
             `;
-        } else {
-            recentActivities.forEach((activity, index) => {
-                if (!activity || typeof activity !== 'object') return;
-                const timeAgo = this.getTimeAgoText(activity.time || '');
-                const borderBottom = index < recentActivities.length - 1 ? 'border-bottom: 1px solid #e5e7eb;' : '';
-                const title = (activity.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-                const desc = (activity.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-                const icon = activity.icon || '📋';
-                const type = ['success','info','warning'].includes(activity.type) ? activity.type : 'info';
-                
-                html += `
+            } else {
+                recentActivities.forEach((activity, index) => {
+                    if (!activity || typeof activity !== 'object') return;
+                    const timeAgo = this.getTimeAgoText(activity.time || '');
+                    const borderBottom = index < recentActivities.length - 1 ? 'border-bottom: 1px solid #e5e7eb;' : '';
+                    const title = (activity.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    const desc = (activity.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    const icon = activity.icon || '📋';
+                    const type = ['success', 'info', 'warning'].includes(activity.type) ? activity.type : 'info';
+
+                    html += `
                     <div style="padding: 12px 16px; ${borderBottom} display: flex; align-items: flex-start; gap: 12px;">
                         <div class="activity-icon ${type}" style="width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0;">
                             ${icon}
@@ -9212,68 +9326,68 @@ class HamobileBanhang {
                         </div>
                     </div>
                 `;
-            });
-        }
-        
-        html += `
+                });
+            }
+
+            html += `
             </div>
             <div style="margin-top: 12px; padding: 12px; background: #f0f9ff; border-radius: 8px; font-size: 14px; color: #1e40af;">
                 <strong>💡 Thông tin:</strong> Hệ thống tự động ghi nhận tất cả các hoạt động quan trọng để bạn theo dõi.
             </div>
         `;
-        
-        return html;
+
+            return html;
         } catch (err) {
             console.error('getSystemActivityHistory error:', err);
             return '<div style="padding: 20px; text-align: center; color: #6b7280;">Không thể tải lịch sử hoạt động.</div>';
         }
     }
-    
+
     generateInitialActivityHistory() {
         try {
             const now = this.getVietnamTime();
             const activities = [];
             const orders = (this.demoData && this.demoData.orders) ? this.demoData.orders : [];
-        
-        // Hoạt động từ đơn hàng gần đây
-        orders.slice(0, 5).forEach((order, index) => {
-            if (!order || typeof order !== 'object') return;
-            const orderTime = new Date(now.getTime() - (30 + index * 15) * 60 * 1000);
-            const paymentStatus = order.paymentStatus || '';
-            const total = (order.total != null && !isNaN(order.total)) ? order.total : 0;
-            activities.push({
-                id: 'order_' + (order.id || index),
-                type: paymentStatus === 'Đã thanh toán' ? 'success' : 'info',
-                icon: paymentStatus === 'Đã thanh toán' ? '💰' : '📋',
-                title: `Đơn hàng ${order.id || index}`,
-                description: `${paymentStatus === 'Đã thanh toán' ? 'Đã thanh toán' : 'Tạo mới'} - Khách hàng: ${order.customerName || '-'} - Giá trị: ${total.toLocaleString('vi-VN')} VNĐ`,
-                time: orderTime.toISOString(),
-                category: 'order'
+
+            // Hoạt động từ đơn hàng gần đây
+            orders.slice(0, 5).forEach((order, index) => {
+                if (!order || typeof order !== 'object') return;
+                const orderTime = new Date(now.getTime() - (30 + index * 15) * 60 * 1000);
+                const paymentStatus = order.paymentStatus || '';
+                const total = (order.total != null && !isNaN(order.total)) ? order.total : 0;
+                activities.push({
+                    id: 'order_' + (order.id || index),
+                    type: paymentStatus === 'Đã thanh toán' ? 'success' : 'info',
+                    icon: paymentStatus === 'Đã thanh toán' ? '💰' : '📋',
+                    title: `Đơn hàng ${order.id || index}`,
+                    description: `${paymentStatus === 'Đã thanh toán' ? 'Đã thanh toán' : 'Tạo mới'} - Khách hàng: ${order.customerName || '-'} - Giá trị: ${total.toLocaleString('vi-VN')} VNĐ`,
+                    time: orderTime.toISOString(),
+                    category: 'order'
+                });
             });
-        });
-        
-        // Hoạt động hệ thống
-        activities.push({
-            id: 'system_start',
-            type: 'info',
-            icon: '🚀',
-            title: 'Khởi động hệ thống',
-            description: 'Hệ thống Hangho đã được khởi động và sẵn sàng hoạt động',
-            time: new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(),
-            category: 'system'
-        });
-        
-        activities.push({
-            id: 'data_loaded',
-            type: 'success',
-            icon: '💾',
-            title: 'Tải dữ liệu thành công',
-            description: `Đã tải ${(this.demoData.customers || []).length} khách hàng, ${(this.demoData.products || []).length} sản phẩm, ${(this.demoData.orders || []).length} đơn hàng`,
-            time: new Date(now.getTime() - 90 * 60 * 1000).toISOString(),
-            category: 'system'
-        });
-        
-        return activities;
+
+            // Hoạt động hệ thống
+            activities.push({
+                id: 'system_start',
+                type: 'info',
+                icon: '🚀',
+                title: 'Khởi động hệ thống',
+                description: 'Hệ thống Hangho đã được khởi động và sẵn sàng hoạt động',
+                time: new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(),
+                category: 'system'
+            });
+
+            activities.push({
+                id: 'data_loaded',
+                type: 'success',
+                icon: '💾',
+                title: 'Tải dữ liệu thành công',
+                description: `Đã tải ${(this.demoData.customers || []).length} khách hàng, ${(this.demoData.products || []).length} sản phẩm, ${(this.demoData.orders || []).length} đơn hàng`,
+                time: new Date(now.getTime() - 90 * 60 * 1000).toISOString(),
+                category: 'system'
+            });
+
+            return activities;
         } catch (err) {
             console.error('generateInitialActivityHistory error:', err);
             return [{
@@ -9287,7 +9401,7 @@ class HamobileBanhang {
             }];
         }
     }
-    
+
     addActivityLog(type, icon, title, description, category = 'user') {
         let activities = window.FirebaseStorage.getMeta('system_activity_history') || [];
         if (!Array.isArray(activities)) activities = [];
@@ -9305,9 +9419,9 @@ class HamobileBanhang {
         window.FirebaseStorage.setMeta('system_activity_history', activities);
         window.FirebaseStorage.save({ meta: { system_activity_history: activities } });
     }
-    
 
-    
+
+
     getTimeAgoText(timeString) {
         if (!timeString) return '';
         const now = this.getVietnamTime();
@@ -9317,26 +9431,26 @@ class HamobileBanhang {
         const diffMins = Math.floor(diffMs / (1000 * 60));
         const diffHours = Math.floor(diffMins / 60);
         const diffDays = Math.floor(diffHours / 24);
-        
+
         if (diffMins < 1) return 'Vừa xong';
         if (diffMins < 60) return `${diffMins} phút trước`;
         if (diffHours < 24) return `${diffHours} giờ trước`;
         if (diffDays < 7) return `${diffDays} ngày trước`;
-        
+
         return time.toLocaleDateString('vi-VN', {
             day: '2-digit',
-            month: '2-digit', 
+            month: '2-digit',
             year: 'numeric',
             hour: '2-digit',
             minute: '2-digit'
         });
     }
-    
+
     showNotification(message, type = 'info', durationMs = 3000, longForm = false) {
         const notification = document.getElementById('notification');
         if (!notification) return;
         if (notification._notifyTimer) {
-            try { clearTimeout(notification._notifyTimer); } catch (_) {}
+            try { clearTimeout(notification._notifyTimer); } catch (_) { }
             notification._notifyTimer = null;
         }
         notification.textContent = message;
@@ -9347,9 +9461,9 @@ class HamobileBanhang {
             notification._notifyTimer = null;
         }, durationMs);
     }
-    
-    
-    
+
+
+
     // Customer Management Functions
     showAddCustomerForm() {
         const formHTML = `
@@ -9427,12 +9541,12 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     toggleAddCustomerFields(customerType) {
         const companyField = document.getElementById('add-company-field');
         const taxField = document.getElementById('add-tax-field');
         const companyInput = document.querySelector('input[name="companyName"]');
-        
+
         if (customerType === 'doanh-nghiep') {
             companyField.style.display = 'block';
             taxField.style.display = 'block';
@@ -9469,20 +9583,20 @@ class HamobileBanhang {
             debt: 0,
             totalOrders: 0
         };
-        
+
         this.demoData.customers.push(newCustomer);
         this.saveToFirebaseImmediate().then(ok => { if (!ok) this.saveToLocalStorage(); });
         this.showNotification(`Đã thêm khách hàng ${newCustomer.name}`, 'success');
         this.loadPage('customers');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     editCustomer(index) {
         const customer = this.demoData.customers[index];
         const customerType = customer.type || 'ca-nhan';
         const companyDisplay = customerType === 'doanh-nghiep' ? 'block' : 'none';
         const taxDisplay = customerType === 'doanh-nghiep' ? 'block' : 'none';
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 600px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -9566,12 +9680,12 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     toggleEditCustomerFields(customerType) {
         const companyField = document.getElementById('edit-company-field');
         const taxField = document.getElementById('edit-tax-field');
         const companyInput = document.querySelector('input[name="companyName"]');
-        
+
         if (customerType === 'doanh-nghiep') {
             companyField.style.display = 'block';
             taxField.style.display = 'block';
@@ -9607,14 +9721,14 @@ class HamobileBanhang {
             notes: formData.get('notes') || '',
             debt: parseInt(formData.get('debt')) || 0
         };
-        
+
         this.saveToFirebaseImmediate().then(ok => { if (!ok) this.saveToLocalStorage(); });
         this.refreshAllCustomerDisplays();
         this.showNotification(`Đã cập nhật thông tin khách hàng`, 'success');
         this.loadPage('customers');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     async deleteCustomer(index) {
         const customer = this.demoData.customers[index];
         if (await confirmAsync({
@@ -9648,27 +9762,27 @@ class HamobileBanhang {
     showCustomerDetails(index) {
         console.log('🔍 showCustomerDetails được gọi với index:', index);
         console.log('👥 Tổng số khách hàng:', this.demoData.customers.length);
-        
+
         const customer = this.demoData.customers[index];
         if (!customer) {
             console.error('❌ Không tìm thấy khách hàng ở index:', index);
             this.showNotification('Không tìm thấy khách hàng', 'error');
             return;
         }
-        
+
         console.log('✅ Tìm thấy khách hàng:', customer);
-        
+
         // Tìm tất cả đơn hàng của khách hàng này
         const customerOrders = this.demoData.orders.filter(order => order.customerId === customer.id);
-        
+
         // Tính tổng tiền đã mua
         const totalPurchased = customerOrders.reduce((sum, order) => sum + order.total, 0);
-        
+
         // Tổng đã thanh toán = tổng số tiền khách đã trả từng đơn
         const totalPaid = customerOrders.reduce((sum, order) => sum + (order.amountPaid || (order.paymentStatus === 'Đã thanh toán' ? order.total : 0)), 0);
         // Công nợ = tổng (Tổng đơn − Khách thanh toán) từng đơn
         const actualDebt = customerOrders.reduce((sum, order) => sum + Math.max(0, (order.total || 0) - (order.amountPaid != null ? order.amountPaid : (order.paymentStatus === 'Đã thanh toán' ? order.total : 0))), 0);
-        
+
         // Danh sách đơn hàng (sắp xếp mới nhất lên trên)
         const sortedCustomerOrders = this.sortOrdersByDate(customerOrders);
         const ordersTable = sortedCustomerOrders.length > 0 ? sortedCustomerOrders.map((order, orderIndex) => {
@@ -9754,10 +9868,10 @@ class HamobileBanhang {
                             <div style="font-size: 16px; font-weight: bold; margin-bottom: 4px;">${totalPaid.toLocaleString('vi-VN')} VNĐ</div>
                             <div style="font-size: 12px; opacity: 0.9;">Đã thanh toán</div>
                         </div>
-                        <div style="background: ${(customer.debt||0) > 0 ? 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)' : 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)'}; color: ${(customer.debt||0) > 0 ? 'white' : '#374151'}; padding: 12px; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 16px; font-weight: bold; margin-bottom: 4px;">${(customer.debt||0).toLocaleString('vi-VN')} VNĐ</div>
+                        <div style="background: ${(customer.debt || 0) > 0 ? 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)' : 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)'}; color: ${(customer.debt || 0) > 0 ? 'white' : '#374151'}; padding: 12px; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 16px; font-weight: bold; margin-bottom: 4px;">${(customer.debt || 0).toLocaleString('vi-VN')} VNĐ</div>
                             <div style="font-size: 12px; opacity: 0.9;">Công nợ hiện tại</div>
-                            ${actualDebt !== (customer.debt||0) ? `<div style="font-size: 11px; opacity: 0.8; margin-top: 4px;">Từ đơn: ${actualDebt.toLocaleString('vi-VN')}</div>` : ''}
+                            ${actualDebt !== (customer.debt || 0) ? `<div style="font-size: 11px; opacity: 0.8; margin-top: 4px;">Từ đơn: ${actualDebt.toLocaleString('vi-VN')}</div>` : ''}
                         </div>
                         <div onclick="app.exportCustomerReport('${customer.id}', '${customer.name}')" style="background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); color: #374151; padding: 12px; border-radius: 8px; text-align: center; cursor: pointer; transition: transform 0.2s; position: relative;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
                             <div style="font-size: 16px; font-weight: bold; margin-bottom: 4px;">📄</div>
@@ -9799,7 +9913,7 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', detailHTML);
     }
 
@@ -9807,7 +9921,7 @@ class HamobileBanhang {
         // Hiển thị popup chọn ngày để xuất báo cáo
         this.showDateRangePickerForCustomerReport(customerId, customerName);
     }
-    
+
     showDateRangePickerForCustomerReport(customerId, customerName) {
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
@@ -9866,26 +9980,26 @@ class HamobileBanhang {
             </div>
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
-        
+
         // Set default dates (last 30 days)
         const endDate = new Date();
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - 30);
-        
+
         const form = document.querySelector('input[name="startDate"]').closest('form');
         form.querySelector('input[name="startDate"]').value = startDate.toISOString().split('T')[0];
         form.querySelector('input[name="endDate"]').value = endDate.toISOString().split('T')[0];
     }
-    
+
     setDateRange(period, customerInfo) {
         const [customerId, customerName] = customerInfo.split('-', 2);
         const form = document.querySelector('input[name="startDate"]').closest('form');
         if (!form) return;
-        
+
         const endDate = new Date();
         const startDate = new Date();
-        
-        switch(period) {
+
+        switch (period) {
             case '7days':
                 startDate.setDate(startDate.getDate() - 7);
                 break;
@@ -9896,44 +10010,44 @@ class HamobileBanhang {
                 startDate.setDate(1); // First day of current month
                 break;
         }
-        
+
         form.querySelector('input[name="startDate"]').value = startDate.toISOString().split('T')[0];
         form.querySelector('input[name="endDate"]').value = endDate.toISOString().split('T')[0];
     }
-    
+
     generateCustomerReport(event, customerId, customerName) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
         const startDate = formData.get('startDate');
         const endDate = formData.get('endDate');
-        
+
         if (new Date(startDate) > new Date(endDate)) {
             this.showNotification('Ngày bắt đầu không thể lớn hơn ngày kết thúc', 'error');
             return;
         }
-        
+
         // Close the modal
-        const modal = form.closest("div[style*=\"fixed\"]"); 
-        if(modal) modal.remove();
-        
+        const modal = form.closest("div[style*=\"fixed\"]");
+        if (modal) modal.remove();
+
         // Generate report with date filter
         this.exportCustomerReportWithDateRange(customerId, customerName, startDate, endDate);
     }
-    
+
     exportCustomerReportWithDateRange(customerId, customerName, startDate, endDate) {
         // Tìm tất cả đơn hàng của khách hàng trong khoảng thời gian
         const customerOrders = this.demoData.orders.filter(order => {
             if (order.customerId !== customerId) return false;
-            
+
             // Convert order date to comparable format
             const orderDate = new Date(order.date.split('/').reverse().join('-'));
             const filterStartDate = new Date(startDate);
             const filterEndDate = new Date(endDate);
-            
+
             return orderDate >= filterStartDate && orderDate <= filterEndDate;
         });
-        
+
         if (customerOrders.length === 0) {
             this.showNotification(`Khách hàng ${customerName} không có đơn hàng nào trong khoảng thời gian ${startDate} đến ${endDate}`, 'warning');
             return;
@@ -9951,7 +10065,7 @@ class HamobileBanhang {
         // Format dates for display
         const formatStartDate = new Date(startDate).toLocaleDateString('vi-VN');
         const formatEndDate = new Date(endDate).toLocaleDateString('vi-VN');
-        
+
         // Tạo nội dung báo cáo HTML
         let reportContent = `
             <div style="max-width: 800px; margin: 0 auto; padding: 20px; font-family: Arial, sans-serif; line-height: 1.6;">
@@ -10036,7 +10150,7 @@ class HamobileBanhang {
         const printWindow = window.open('', '_blank', 'width=800,height=600');
         printWindow.document.write(`
             <!DOCTYPE html>
-            <html>
+            <html dir="ltr" lang="vi">
             <head>
                 <title>Báo cáo khách hàng - ${customerName}</title>
                 <meta charset="UTF-8">
@@ -10082,7 +10196,7 @@ class HamobileBanhang {
         // Tạo dữ liệu Excel với tiêu đề tiếng Việt
         const headers = ['Mã SP', 'Tên sản phẩm', 'Danh mục', 'Giá bán', 'Giá nhập', 'Tồn kho', 'IMEI', 'Nhà cung cấp'];
         const excelData = [headers];
-        
+
         this.demoData.products.forEach(product => {
             const imeiStr = (product.imeis && product.imeis.length) ? product.imeis.join(', ') : '';
             excelData.push([
@@ -10098,7 +10212,7 @@ class HamobileBanhang {
         });
 
         // Tạo nội dung CSV
-        const csvContent = excelData.map(row => 
+        const csvContent = excelData.map(row =>
             row.map(field => {
                 // Xử lý field có dấu phẩy hoặc dấu ngoặc kép
                 if (typeof field === 'string' && (field.includes(',') || field.includes('"'))) {
@@ -10116,7 +10230,7 @@ class HamobileBanhang {
         const blob = new Blob([csvWithBOM], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         const url = URL.createObjectURL(blob);
-        
+
         link.setAttribute('href', url);
         link.setAttribute('download', `SanPham_Backup_${this.formatDateForFilename()}.csv`);
         link.style.visibility = 'hidden';
@@ -10271,7 +10385,7 @@ class HamobileBanhang {
         const form = event.target;
         const fileInput = form.querySelector('input[type="file"]');
         const duplicateAction = form.querySelector('input[name="duplicateAction"]:checked').value;
-        
+
         if (!fileInput.files[0]) {
             this.showNotification('Vui lòng chọn file Excel', 'error');
             return;
@@ -10283,18 +10397,18 @@ class HamobileBanhang {
         reader.onload = (e) => {
             try {
                 let csvData = e.target.result;
-                
+
                 // Loại bỏ BOM nếu có
                 if (csvData.charCodeAt(0) === 0xFEFF) {
                     csvData = csvData.slice(1);
                 }
-                
+
                 console.log('Raw CSV Data:', csvData.substring(0, 200));
-                
+
                 const lines = csvData.split('\n').filter(line => line.trim());
                 console.log('Số dòng đọc được:', lines.length);
                 console.log('Dòng đầu tiên:', lines[0]);
-                
+
                 if (lines.length < 2) {
                     this.showNotification('File Excel phải có ít nhất 1 dòng tiêu đề và 1 dòng dữ liệu', 'error');
                     return;
@@ -10346,7 +10460,7 @@ class HamobileBanhang {
                     const list = [...missingCategories];
                     const msg = list.map(c => `Tạo danh mục "${c}" ngay để tránh bị lỗi`).join('\n');
                     this.showNotification(msg, 'error');
-                    const listHtml = list.map(c => `<li><strong>"${(c||'').replace(/</g,'&lt;')}"</strong></li>`).join('');
+                    const listHtml = list.map(c => `<li><strong>"${(c || '').replace(/</g, '&lt;')}"</strong></li>`).join('');
                     const modalHtml = `
                         <div id="missing-category-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1002; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this) document.getElementById('missing-category-modal').remove()">
                             <div style="background: white; padding: 24px; border-radius: 12px; width: 420px; max-width: 95vw; box-shadow: 0 4px 20px rgba(0,0,0,0.2);" onclick="event.stopPropagation()">
@@ -10375,9 +10489,9 @@ class HamobileBanhang {
 
                 dataLines.forEach((line, index) => {
                     if (!line.trim()) return;
-                    
+
                     const columns = this.parseCSVLineWithDelimiter(line.trim(), delimiter);
-                    
+
                     if (columns.length < 7) {
                         console.warn(`Dòng ${index + 2}: Chỉ có ${columns.length} cột`);
                         errorLines.push(`Dòng ${index + 2}: Không đủ cột (cần ít nhất 7)`);
@@ -10393,7 +10507,7 @@ class HamobileBanhang {
                     const stock = useOrder ? columns[5] : get(colStock);
                     const imeiCol = useOrder ? (columns[6] || '') : get(colImei);
                     const supplier = useOrder ? (columns[7] || '') : get(colSupplier);
-                    
+
                     if (!id?.trim() || !name?.trim() || !price?.trim()) {
                         errorLines.push(`Dòng ${index + 2}: Thiếu Mã SP, Tên hoặc Giá bán`);
                         skippedCount++;
@@ -10406,12 +10520,12 @@ class HamobileBanhang {
 
                     const cleanId = id.trim();
                     const existingIndex = this.demoData.products.findIndex(p => p.id === cleanId);
-                    
+
                     const imeiRaw = (imeiCol || '').toString().trim();
                     const imeis = imeiRaw ? imeiRaw.split(/[\n,;]+/).map(v => v.trim()).filter(v => v.length > 0) : [];
                     const hasImei = imeis.length > 0;
                     const stockNum = parseInt(stock) || 0;
-                    
+
                     const productData = {
                         id: cleanId,
                         name: name.trim(),
@@ -10437,7 +10551,7 @@ class HamobileBanhang {
                     }
                 });
 
-                console.log('Upload results:', {addedCount, updatedCount, skippedCount});
+                console.log('Upload results:', { addedCount, updatedCount, skippedCount });
 
                 this.saveToLocalStorage();
                 this.loadPage('products');
@@ -10446,14 +10560,14 @@ class HamobileBanhang {
                 if (addedCount > 0) message += `${addedCount} sản phẩm mới, `;
                 if (updatedCount > 0) message += `${updatedCount} sản phẩm cập nhật, `;
                 if (skippedCount > 0) message += `${skippedCount} sản phẩm bỏ qua`;
-                
+
                 if (errorLines.length > 0) {
                     message += `\n\nChi tiết lỗi:\n${errorLines.join('\n')}`;
                 }
-                
+
                 this.showNotification(message, addedCount > 0 || updatedCount > 0 ? 'success' : 'warning');
-                const modal = form.closest("div[style*=\"fixed\"]"); 
-                if(modal) modal.remove();
+                const modal = form.closest("div[style*=\"fixed\"]");
+                if (modal) modal.remove();
 
             } catch (error) {
                 console.error('Lỗi đọc file Excel:', error);
@@ -10500,10 +10614,10 @@ class HamobileBanhang {
         const columns = [];
         let current = '';
         let inQuotes = false;
-        
+
         for (let i = 0; i < line.length; i++) {
             const char = line[i];
-            
+
             if (char === '"' && !inQuotes) {
                 inQuotes = true;
             } else if (char === '"' && inQuotes) {
@@ -10520,7 +10634,7 @@ class HamobileBanhang {
                 current += char;
             }
         }
-        
+
         columns.push(current.trim());
         return columns;
     }
@@ -10579,7 +10693,7 @@ class HamobileBanhang {
         }
         this.deleteProduct(index);
     }
-    
+
     showSearchCustomer() {
         this.customersSearchVisible = true;
         const input = document.getElementById('customer-search');
@@ -10590,7 +10704,7 @@ class HamobileBanhang {
         this.loadPage('customers');
         setTimeout(() => document.getElementById('customer-search')?.focus(), 50);
     }
-    
+
     searchCustomers(query) {
         this.customersSearchQuery = query || '';
         const tbody = document.querySelector('#customers-table tbody');
@@ -10676,7 +10790,7 @@ class HamobileBanhang {
 
         container.innerHTML = rows;
     }
-    
+
     exportCustomers(mode = null) {
         if (!mode) {
             this.showExportOptions('Xuất dữ liệu khách hàng', 'customers', 'exportCustomers');
@@ -10694,12 +10808,12 @@ class HamobileBanhang {
             ];
             this.showDataViewer('Danh sách khách hàng', this.demoData.customers, columns);
         } else if (mode === 'download') {
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 "Mã KH,Tên khách hàng,Điện thoại,Email,Địa chỉ,Công nợ\n" +
-                this.demoData.customers.map(c => 
+                this.demoData.customers.map(c =>
                     `${c.id},"${c.name}","${c.phone}","${c.email}","${c.address}",${c.debt}`
                 ).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -10707,11 +10821,11 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification('Đã tải xuống danh sách khách hàng', 'success');
         }
     }
-    
+
     // Validation helper - hiển thị lỗi cạnh ô
     clearFieldErrors(form) {
         if (!form) return;
@@ -10810,22 +10924,22 @@ class HamobileBanhang {
                 }
                 window.FirebaseStorage.setData(this.demoData);
             }
-        } catch (_) {}
+        } catch (_) { }
     }
-    
+
     saveToFirebaseImmediate() {
         if (!this.demoData.debtPayments) this.demoData.debtPayments = [];
         if (!this.demoData.debtors) this.demoData.debtors = [];
         if (!this.demoData.repairs) this.demoData.repairs = [];
         const app = this;
-        return this.guardOrdersBeforeCloudSave().then(function() {
+        return this.guardOrdersBeforeCloudSave().then(function () {
             window.FirebaseStorage.setData(app.demoData);
             return window.FirebaseStorage.save({ data: app.demoData });
-        }).then(function(ok) {
+        }).then(function (ok) {
             if (ok && window.FirebaseStorage.getMeta('backup_interval') === '0') {
                 const backupTime = app.getVietnamTime().toISOString();
                 window.FirebaseStorage.setMeta('last_backup_time', backupTime);
-                window.FirebaseStorage.save({ meta: { last_backup_time: backupTime } }).catch(function() {});
+                window.FirebaseStorage.save({ meta: { last_backup_time: backupTime } }).catch(function () { });
                 if (app.currentPage === 'settings') {
                     const el = document.getElementById('backup-last-time');
                     if (el) el.textContent = new Date(backupTime).toLocaleString('vi-VN');
@@ -10861,7 +10975,7 @@ class HamobileBanhang {
             });
         }, 600);
     }
-    
+
     async loadFromFirebaseStorage() {
         const loaded = await window.FirebaseStorage.load();
         if (loaded && loaded.data) {
@@ -10875,11 +10989,11 @@ class HamobileBanhang {
         if (data) { this.demoData = data; return true; }
         return false;
     }
-    
+
     getFirebaseConfig() {
         return window.FirebaseStorage.getConfig();
     }
-    
+
     syncToFirebase() {
         window.FirebaseStorage.setData(this.demoData);
         window.FirebaseStorage.setMeta('last_sync', new Date().toISOString());
@@ -10892,7 +11006,7 @@ class HamobileBanhang {
             }
         });
     }
-    
+
     async testFirebaseConnection() {
         const cfg = this.getFirebaseConfig();
         if (!cfg) {
@@ -10941,7 +11055,7 @@ class HamobileBanhang {
                 }
             });
     }
-    
+
     async confirmLoadFromFirebaseCloud() {
         var ok = await confirmAsync({
             title: 'Xác nhận khôi phục từ đám mây',
@@ -10983,12 +11097,12 @@ class HamobileBanhang {
             } else { if (callback) callback(false); }
         }).catch(() => { if (callback) callback(false); });
     }
-    
+
     saveFirebaseConfig(url, key) {
         window.FirebaseStorage.setConfig(url, key);
         this.syncToFirebase();
     }
-    
+
     toggleAutoBackup(enabled) {
         window.FirebaseStorage.setMeta('auto_backup_enabled', enabled.toString());
         window.FirebaseStorage.save({ meta: { auto_backup_enabled: enabled.toString() } });
@@ -11003,7 +11117,7 @@ class HamobileBanhang {
             this.showNotification('Đã tắt tự động sao lưu', 'info');
         }
     }
-    
+
     setBackupInterval(minutes) {
         window.FirebaseStorage.setMeta('backup_interval', minutes);
         window.FirebaseStorage.save({ meta: { backup_interval: minutes } });
@@ -11014,7 +11128,7 @@ class HamobileBanhang {
             this.showNotification(msg, 'success');
         }
     }
-    
+
     startAutoBackup() {
         this.stopAutoBackup();
         const interval = parseInt(window.FirebaseStorage.getMeta('backup_interval') || '15', 10);
@@ -11025,14 +11139,14 @@ class HamobileBanhang {
             if (window.app && window.app.demoData) window.app.scheduledCloudSnapshot();
         }, interval * 60 * 1000);
     }
-    
+
     stopAutoBackup() {
         if (this.autoBackupTimer) {
             clearInterval(this.autoBackupTimer);
             this.autoBackupTimer = null;
         }
     }
-    
+
     async manualBackup() {
         const r = await this.performBackup({ downloadFile: true, cloudSnapshot: true });
         if (r && r.hadDownload && r.snapshotOk === false) {
@@ -11050,7 +11164,7 @@ class HamobileBanhang {
         if (!window.FirebaseStorage.getConfig() || !this.demoData) return;
         const backupData = this.buildBackupExportPayload();
         const app = this;
-        window.FirebaseStorage.pushRollingSnapshot(backupData).then(function(ok) {
+        window.FirebaseStorage.pushRollingSnapshot(backupData).then(function (ok) {
             const backupTime = app.getVietnamTime().toISOString();
             window.FirebaseStorage.setMeta('last_backup_time', backupTime);
             if (app.currentPage === 'settings') {
@@ -11075,7 +11189,7 @@ class HamobileBanhang {
             }
         };
     }
-    
+
     async performBackup(options) {
         const downloadFile = options && options.downloadFile === true;
         const cloudSnapshot = !options || options.cloudSnapshot !== false;
@@ -11109,7 +11223,7 @@ class HamobileBanhang {
                             setTimeout(function () {
                                 try {
                                     URL.revokeObjectURL(url);
-                                } catch (_) {}
+                                } catch (_) { }
                             }, 2500);
                         } catch (err) {
                             console.error('performBackup download:', err);
@@ -11135,17 +11249,17 @@ class HamobileBanhang {
         }
         return { hadDownload: downloadFile, snapshotOk: snapshotOk };
     }
-    
+
     restoreFromFile(event) {
         const file = event.target.files[0];
         if (!file) return;
-        
+
         const nameLc = String(file.name || '').toLowerCase();
         if (file.type && file.type !== 'application/json' && !nameLc.endsWith('.json')) {
             this.showNotification('Vui lòng chọn file JSON hợp lệ', 'error');
             return;
         }
-        
+
         const reader = new FileReader();
         reader.onload = async (e) => {
             try {
@@ -11155,7 +11269,7 @@ class HamobileBanhang {
                 if (!backupData || typeof backupData !== 'object' || !backupData.data || typeof backupData.data !== 'object' || Array.isArray(backupData.data)) {
                     throw new Error('File backup không đúng định dạng (cần có object data).');
                 }
-                
+
                 var restoreOk = await confirmAsync({
                     title: 'Xác nhận khôi phục dữ liệu',
                     message:
@@ -11166,7 +11280,7 @@ class HamobileBanhang {
                     variant: 'danger',
                 });
                 if (!restoreOk) return;
-                
+
                 this.demoData = backupData.data;
                 haEnsurePosDataArraysInPlace(this.demoData);
                 if (!this.demoData.customers) this.demoData.customers = [];
@@ -11177,7 +11291,7 @@ class HamobileBanhang {
                 window.FirebaseStorage.setData(this.demoData);
                 this.migrateProductData();
                 this._hasUnsyncedChanges = true;
-                
+
                 this.showNotification('Đang lưu dữ liệu...', 'info');
                 const ok = await this.saveToFirebaseImmediate();
                 if (ok) {
@@ -11195,14 +11309,77 @@ class HamobileBanhang {
         reader.readAsText(file);
         event.target.value = '';
     }
-    
+
+    async pickSecondaryDrive() {
+        if (!window.HaSecondaryBackup || !window.HaSecondaryBackup.isSupported()) {
+            this.showNotification('Trình duyệt không hỗ trợ. Dùng Chrome hoặc Edge.', 'warning');
+            return;
+        }
+        const result = await window.HaSecondaryBackup.pickDirectory();
+        if (result.ok) {
+            /* Ghi ngay lần đầu */
+            const current = window.FirebaseStorage._cache;
+            if (current && current.data) {
+                await window.HaSecondaryBackup.writeData(current);
+            }
+            this._refreshSecondaryBackupUI();
+            this.showNotification('✅ Đang backup ra: ' + result.name, 'success', 4000);
+        } else if (result.reason !== 'cancelled') {
+            this.showNotification('Không thể chọn thư mục: ' + result.reason, 'error');
+        }
+    }
+
+    async clearSecondaryDrive() {
+        await window.HaSecondaryBackup.clear();
+        this._refreshSecondaryBackupUI();
+        this.showNotification('Đã tắt backup ổ phụ.', 'info');
+    }
+
+    _refreshSecondaryBackupUI() {
+        const enabled = window.HaSecondaryBackup && window.HaSecondaryBackup.isEnabled();
+        const name = enabled ? window.HaSecondaryBackup.getLabel() : '';
+
+        /* Cập nhật ô trạng thái */
+        const statusEl = document.getElementById('secondary-backup-status');
+        if (statusEl) {
+            if (enabled) {
+                statusEl.style.cssText = 'margin-bottom:16px;padding:10px 14px;border-radius:8px;font-size:13px;font-weight:600;background:#ecfdf5;color:#065f46;border:1px solid #6ee7b7;';
+                statusEl.innerHTML = '✅ Đang backup ra: <strong>' + escapeHtml(name) + '</strong>';
+            } else {
+                statusEl.style.cssText = 'margin-bottom:16px;padding:10px 14px;border-radius:8px;font-size:13px;font-weight:600;background:#f9fafb;color:#6b7280;border:1px solid #e5e7eb;';
+                statusEl.innerHTML = '⚪ Chưa cấu hình ổ phụ';
+            }
+        }
+
+        /* Cập nhật border card */
+        const card = statusEl && statusEl.closest('div[style*="border:"]');
+        if (card) card.style.borderColor = enabled ? '#10b981' : '#e5e7eb';
+
+        /* Cập nhật nút bấm */
+        const actionsEl = document.getElementById('secondary-backup-actions');
+        if (actionsEl) {
+            actionsEl.innerHTML = `
+                <button type="button" onclick="app.pickSecondaryDrive()"
+                    style="flex:1;min-width:160px;padding:10px 16px;background:linear-gradient(135deg,#047857,#10b981);
+                           color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">
+                    📂 ${enabled ? 'Đổi thư mục' : 'Chọn ổ / thư mục'}
+                </button>
+                ${enabled ? `<button type="button" onclick="app.clearSecondaryDrive()"
+                    style="padding:10px 16px;border:1px solid #ef4444;color:#ef4444;background:white;
+                           border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;">
+                    🗑️ Tắt backup ổ phụ
+                </button>` : ''}
+            `;
+        }
+    }
+
     calculateStorageSize() {
         const data = JSON.stringify(window.FirebaseStorage.getData() || this.demoData);
         if (data) {
             const sizeInBytes = new Blob([data]).size;
             const sizeInKB = (sizeInBytes / 1024).toFixed(1);
             const sizeInMB = (sizeInBytes / (1024 * 1024)).toFixed(2);
-            
+
             if (sizeInBytes < 1024) {
                 return `${sizeInBytes} B`;
             } else if (sizeInBytes < 1024 * 1024) {
@@ -11213,11 +11390,11 @@ class HamobileBanhang {
         }
         return '0 B';
     }
-    
+
     // Company Settings Functions
     saveCompanySettings(event) {
         event.preventDefault();
-        
+
         const formData = new FormData(event.target);
         const companySettings = {
             companyName: formData.get('companyName'),
@@ -11230,19 +11407,19 @@ class HamobileBanhang {
             description: formData.get('description'),
             updatedAt: this.getVietnamTime().toISOString()
         };
-        
+
         if (!companySettings.companyName.trim() || !companySettings.address.trim() || !companySettings.phone.trim()) {
             this.showNotification('Vui lòng điền đầy đủ thông tin bắt buộc (có dấu *)', 'error');
             return;
         }
-        
+
         window.FirebaseStorage.setCompany(companySettings);
         window.FirebaseStorage.save({ company: companySettings });
         this.showNotification('Đã lưu thông tin công ty thành công! Thông tin này sẽ hiển thị trên hóa đơn in ra.', 'success');
-        
+
         console.log('💾 Company settings saved:', companySettings);
     }
-    
+
     async resetCompanySettings() {
         if (await confirmAsync({
             title: 'Xác nhận',
@@ -11254,21 +11431,21 @@ class HamobileBanhang {
             window.FirebaseStorage.setCompany({});
             window.FirebaseStorage.save({ company: {} });
             this.showNotification('Đã xóa thông tin công ty', 'success');
-            
+
             // Reload settings page to show empty form
             this.loadPage('settings');
         }
     }
-    
+
     getCompanySettings() {
         try {
             const parsed = window.FirebaseStorage.getCompany();
             if (!parsed || typeof parsed !== 'object') return {};
-            
+
             console.log('Loading company settings...');
             console.log('Logo exists:', !!parsed.logo);
             console.log('QR exists:', !!parsed.qrCode);
-            
+
             return parsed;
         } catch (error) {
             console.error('Error loading company settings:', error);
@@ -11281,13 +11458,13 @@ class HamobileBanhang {
         console.log('=== FULL DEBUG FIREBASE STORAGE ===');
         console.log('Company data exists:', !!parsed);
         console.log('Size estimate:', this.getLocalStorageSize());
-        
+
         if (parsed) {
             try {
                 console.log('Parsed successfully');
                 console.log('Company name:', parsed.companyName || 'Not set');
-                console.log('Logo exists:', !!parsed.logo, parsed.logo ? `(${(parsed.logo.length/1024).toFixed(1)}KB)` : '');
-                console.log('QR exists:', !!parsed.qrCode, parsed.qrCode ? `(${(parsed.qrCode.length/1024).toFixed(1)}KB)` : '');
+                console.log('Logo exists:', !!parsed.logo, parsed.logo ? `(${(parsed.logo.length / 1024).toFixed(1)}KB)` : '');
+                console.log('QR exists:', !!parsed.qrCode, parsed.qrCode ? `(${(parsed.qrCode.length / 1024).toFixed(1)}KB)` : '');
             } catch (error) {
                 console.error('JSON Parse Error:', error);
             }
@@ -11312,11 +11489,11 @@ class HamobileBanhang {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             const img = new Image();
-            
+
             img.onload = () => {
                 // Calculate new dimensions maintaining aspect ratio
                 let { width, height } = img;
-                
+
                 if (width > height) {
                     if (width > maxWidth) {
                         height = height * (maxWidth / width);
@@ -11328,18 +11505,18 @@ class HamobileBanhang {
                         height = maxHeight;
                     }
                 }
-                
+
                 canvas.width = width;
                 canvas.height = height;
-                
+
                 // Draw and compress
                 ctx.drawImage(img, 0, 0, width, height);
                 const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
                 resolve(compressedDataUrl);
             };
-            
+
             img.onerror = () => reject(new Error('Failed to load image'));
-            
+
             const reader = new FileReader();
             reader.onload = (e) => {
                 img.src = e.target.result;
@@ -11353,16 +11530,16 @@ class HamobileBanhang {
     uploadLogoSimple(event) {
         const file = event.target.files[0];
         if (!file) return;
-        
+
         if (!file.type.startsWith('image/')) {
             alert('Vui lòng chọn file hình ảnh!');
             return;
         }
-        
+
         const reader = new FileReader();
         reader.onload = (e) => {
             const imageData = e.target.result;
-            
+
             window.companyAssets.logo = imageData;
             const company = window.FirebaseStorage.getCompany();
             company.logo = imageData;
@@ -11373,21 +11550,21 @@ class HamobileBanhang {
         };
         reader.readAsDataURL(file);
     }
-    
+
     // Simple QR upload - lưu Firebase
     uploadQRSimple(event) {
         const file = event.target.files[0];
         if (!file) return;
-        
+
         if (!file.type.startsWith('image/')) {
             alert('Vui lòng chọn file hình ảnh!');
             return;
         }
-        
+
         const reader = new FileReader();
         reader.onload = (e) => {
             const imageData = e.target.result;
-            
+
             window.companyAssets.qr = imageData;
             const company = window.FirebaseStorage.getCompany();
             company.qrCode = imageData;
@@ -11403,33 +11580,33 @@ class HamobileBanhang {
     uploadLogo(event) {
         const file = event.target.files[0];
         if (!file) return;
-        
+
         // Check file type
         if (!file.type.startsWith('image/')) {
             this.showNotification('Vui lòng chọn file hình ảnh (PNG, JPG, GIF)', 'error');
             return;
         }
-        
+
         // Check file size (max 2MB)
         if (file.size > 2 * 1024 * 1024) {
             this.showNotification('Kích thước file quá lớn. Vui lòng chọn file dưới 2MB', 'error');
             return;
         }
-        
+
         // Create unique filename
         const timestamp = Date.now();
         const fileName = `logo_${timestamp}.${file.name.split('.').pop()}`;
         const logoPath = `uploads/${fileName}`;
-        
+
         this.compressImage(file, 0.7, 300, 300).then(async (compressedImageData) => {
-            
+
             // Save logo to company settings with error handling
             const companySettings = this.getCompanySettings();
             companySettings.logo = compressedImageData;
             companySettings.logoPath = logoPath;
             companySettings.logoFileName = fileName;
             companySettings.logoTimestamp = timestamp;
-            
+
             try {
                 window.FirebaseStorage.setCompany(companySettings);
                 await window.FirebaseStorage.save({ company: companySettings });
@@ -11443,14 +11620,14 @@ class HamobileBanhang {
                 this.showNotification('Lỗi lưu logo. Thử lại với file nhỏ hơn.', 'error');
                 return;
             }
-            
+
             console.log('Logo saved with path:', logoPath);
             console.log('Logo data saved:', !!companySettings.logo);
-            
+
             // Update display
             const logoDisplay = document.getElementById('logo-display');
             logoDisplay.innerHTML = `<img src="${compressedImageData}" alt="Logo" style="max-width: 100%; max-height: 140px; object-fit: contain;">`;
-            
+
             // Add remove button
             const buttonContainer = logoDisplay.parentElement.querySelector('div:last-child');
             if (!buttonContainer.querySelector('button[onclick*="removeLogo"]')) {
@@ -11465,9 +11642,9 @@ class HamobileBanhang {
                     </button>
                 `;
             }
-            
+
             this.showNotification(`Đã lưu logo nén vào ${logoPath}!`, 'success');
-            console.log('Compressed logo size:', (compressedImageData.length/1024).toFixed(1) + 'KB');
+            console.log('Compressed logo size:', (compressedImageData.length / 1024).toFixed(1) + 'KB');
         }).catch(error => {
             console.error('Compression error:', error);
             this.showNotification('Lỗi nén ảnh. Thử với file khác.', 'error');
@@ -11483,16 +11660,16 @@ class HamobileBanhang {
             cancelLabel: 'Hủy',
             variant: 'danger',
         }))) return;
-        
+
         const companySettings = this.getCompanySettings();
         delete companySettings.logo;
         window.FirebaseStorage.setCompany(companySettings);
         window.FirebaseStorage.save({ company: companySettings });
-        
+
         // Update display
         const logoDisplay = document.getElementById('logo-display');
         logoDisplay.innerHTML = '<div style="color: #9ca3af; font-size: 14px;">Chưa có logo</div>';
-        
+
         // Remove delete button
         const buttonContainer = logoDisplay.parentElement.querySelector('div:last-child');
         buttonContainer.innerHTML = `
@@ -11501,19 +11678,19 @@ class HamobileBanhang {
                 📁 Chọn Logo
             </button>
         `;
-        
+
         this.showNotification('Đã xóa logo', 'success');
     }
 
     // Generate QR Code function
     generateQRCode() {
         const companySettings = this.getCompanySettings();
-        
+
         if (!companySettings.companyName && !companySettings.phone) {
             this.showNotification('Vui lòng điền thông tin công ty trước khi tạo mã QR', 'error');
             return;
         }
-        
+
         // Create contact info string
         let contactInfo = '';
         if (companySettings.companyName) contactInfo += `Cửa hàng: ${companySettings.companyName}\n`;
@@ -11521,17 +11698,17 @@ class HamobileBanhang {
         if (companySettings.phone) contactInfo += `ĐT: ${companySettings.phone}\n`;
         if (companySettings.email) contactInfo += `Email: ${companySettings.email}\n`;
         if (companySettings.taxCode) contactInfo += `MST: ${companySettings.taxCode}`;
-        
+
         // Generate QR code using qr-server.com API
         const qrSize = 150;
         const qrURL = `https://api.qrserver.com/v1/create-qr-code/?size=${qrSize}x${qrSize}&data=${encodeURIComponent(contactInfo)}&format=png&bgcolor=FFFFFF&color=000000&margin=10`;
-        
+
         // Update QR display
         const qrDisplay = document.getElementById('qr-display');
         qrDisplay.innerHTML = `<img src="${qrURL}" alt="QR Code" style="max-width: 100%; max-height: 140px; object-fit: contain;" 
              onload="app.showNotification('Đã tạo mã QR thành công!', 'success')"
              onerror="app.showNotification('Không thể tạo mã QR. Vui lòng kiểm tra kết nối internet', 'error')">`;
-        
+
         companySettings.qrCode = qrURL;
         window.FirebaseStorage.setCompany(companySettings);
         window.FirebaseStorage.save({ company: companySettings });
@@ -11565,14 +11742,14 @@ class HamobileBanhang {
             // Update QR display
             const qrDisplay = document.getElementById('qr-display');
             qrDisplay.innerHTML = `<img src="${compressedQrData}" alt="QR Code" style="max-width: 100%; max-height: 140px; object-fit: contain;">`;
-            
+
             // Save QR to company settings with error handling
             const companySettings = this.getCompanySettings();
             companySettings.qrCode = compressedQrData;
             companySettings.qrPath = qrPath;
             companySettings.qrFileName = fileName;
             companySettings.qrTimestamp = timestamp;
-            
+
             try {
                 window.FirebaseStorage.setCompany(companySettings);
                 await window.FirebaseStorage.save({ company: companySettings });
@@ -11586,11 +11763,11 @@ class HamobileBanhang {
                 this.showNotification('Lỗi lưu QR. Thử lại với file nhỏ hơn.', 'error');
                 return;
             }
-            
+
             this.showNotification(`Đã lưu mã QR nén vào ${qrPath}!`, 'success');
             console.log('QR saved with path:', qrPath);
-            console.log('Compressed QR size:', (compressedQrData.length/1024).toFixed(1) + 'KB');
-            
+            console.log('Compressed QR size:', (compressedQrData.length / 1024).toFixed(1) + 'KB');
+
             // Reload page to show delete button
             setTimeout(() => {
                 this.loadPage('company-info');
@@ -11610,32 +11787,32 @@ class HamobileBanhang {
             cancelLabel: 'Hủy',
             variant: 'danger',
         }))) return;
-        
+
         const companySettings = this.getCompanySettings();
         delete companySettings.qrCode;
         window.FirebaseStorage.setCompany(companySettings);
         window.FirebaseStorage.save({ company: companySettings });
-        
+
         // Update display
         const qrDisplay = document.getElementById('qr-display');
         qrDisplay.innerHTML = '<div style="color: #9ca3af; font-size: 14px;">Chưa có mã QR</div>';
-        
+
         this.showNotification('Đã xóa mã QR', 'success');
-        
+
         // Reload page to hide delete button
         this.loadPage('company-info');
     }
-    
+
     // Sales Management Functions
     showCreateSaleForm() {
-        const customerOptions = this.demoData.customers.map(c => 
+        const customerOptions = this.demoData.customers.map(c =>
             `<option value="${c.id}">${c.name} - ${c.phone}</option>`
         ).join('');
-        
-        const productOptions = this.demoData.products.map(p => 
+
+        const productOptions = this.demoData.products.map(p =>
             `<option value="${p.id}" data-price="${p.price}" data-stock="${p.stock}">${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ (Còn: ${p.stock})</option>`
         ).join('');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center; overflow-y: auto;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 1000px; max-width: 95vw;" onclick="event.stopPropagation()">
@@ -11674,14 +11851,14 @@ class HamobileBanhang {
                                                        onclick="event.stopPropagation()">
                                             </div>
                                             <div class="dropdown-options">
-                                                ${this.demoData.products.map(p => 
-                                                    `<div class="dropdown-option" data-value="${p.id}" data-price="${p.price}" data-stock="${p.stock}" 
+                                                ${this.demoData.products.map(p =>
+            `<div class="dropdown-option" data-value="${p.id}" data-price="${p.price}" data-stock="${p.stock}" 
                                                           onclick="app.selectProduct(this, '${p.id}', '${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ', ${p.price})" 
                                                           style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" 
                                                           onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">
                                                         ${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ (Còn: ${p.stock})
                                                     </div>`
-                                                ).join('')}
+        ).join('')}
                                             </div>
                                         </div>
                                         <input type="hidden" name="products[]" required>
@@ -11718,7 +11895,7 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     addProductItem() {
         const productItemHTML = `
             <div class="product-item" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
@@ -11736,14 +11913,14 @@ class HamobileBanhang {
                                    onclick="event.stopPropagation()">
                         </div>
                         <div class="dropdown-options">
-                            ${this.demoData.products.map(p => 
-                                `<div class="dropdown-option" data-value="${p.id}" data-price="${p.price}" data-stock="${p.stock}" 
+                            ${this.demoData.products.map(p =>
+            `<div class="dropdown-option" data-value="${p.id}" data-price="${p.price}" data-stock="${p.stock}" 
                                       onclick="app.selectProduct(this, '${p.id}', '${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ', ${p.price})" 
                                       style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" 
                                       onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'">
                                     ${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ (Còn: ${p.stock})
                                 </div>`
-                            ).join('')}
+        ).join('')}
                         </div>
                     </div>
                     <input type="hidden" name="products[]" required>
@@ -11755,24 +11932,24 @@ class HamobileBanhang {
         `;
         document.getElementById('product-items').insertAdjacentHTML('beforeend', productItemHTML);
     }
-    
+
     updateProductPrice(selectElement) {
         console.log('=== updateProductPrice được gọi ===');
         console.log('selectElement:', selectElement);
-        
+
         const selectedOption = selectElement.options[selectElement.selectedIndex];
         console.log('selectedOption:', selectedOption);
-        
+
         const price = selectedOption.getAttribute('data-price') || 0;
         console.log('Giá từ data-price:', price);
-        
+
         // Tìm input price trong cùng div product-item
         const productItem = selectElement.closest('.product-item');
         console.log('productItem tìm thấy:', productItem);
-        
+
         const priceInput = productItem ? productItem.querySelector('input[name="prices[]"]') : null;
         console.log('priceInput tìm thấy:', priceInput);
-        
+
         if (priceInput) {
             priceInput.value = price;
             console.log('✅ ĐÃ CẬP NHẬT GIÁ THÀNH CÔNG:', price);
@@ -11783,27 +11960,27 @@ class HamobileBanhang {
             console.error('- selectElement parent:', selectElement.parentElement);
             console.error('- Tất cả input trong productItem:', productItem ? productItem.querySelectorAll('input') : 'productItem null');
         }
-        
+
         this.calculateTotal();
         console.log('=== updateProductPrice kết thúc ===');
     }
-    
+
     calculateTotal() {
         console.log('=== calculateTotal được gọi ===');
         const quantities = document.querySelectorAll('input[name="quantities[]"]');
         const prices = document.querySelectorAll('input[name="prices[]"]');
         let total = 0;
-        
+
         console.log('Số lượng input quantities:', quantities.length);
         console.log('Số lượng input prices:', prices.length);
-        
+
         for (let i = 0; i < quantities.length; i++) {
             const qty = parseInt(quantities[i].value) || 0;
             const price = parseInt(prices[i].value) || 0;
             console.log(`Item ${i}: qty=${qty}, price=${price}, subtotal=${qty * price}`);
             total += qty * price;
         }
-        
+
         console.log('Tổng tiền:', total);
         const totalElement = document.getElementById('total-amount');
         if (totalElement) {
@@ -11814,21 +11991,21 @@ class HamobileBanhang {
         }
         console.log('=== calculateTotal kết thúc ===');
     }
-    
+
     createSaleOrder(event) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const products = formData.getAll('products[]');
         const quantities = formData.getAll('quantities[]');
         const prices = formData.getAll('prices[]');
-        
+
         if (products.length === 0 || products[0] === '') {
             this.showNotification('Vui lòng chọn ít nhất một sản phẩm', 'error');
             return;
         }
-        
+
         // Tạo thông tin khách hàng từ form
         const customerInfo = {
             name: formData.get('customerName'),
@@ -11837,19 +12014,19 @@ class HamobileBanhang {
         };
         let total = 0;
         const items = [];
-        
+
         for (let i = 0; i < products.length; i++) {
             if (products[i] && quantities[i] && prices[i]) {
                 const product = this.demoData.products.find(p => p.id === products[i]);
                 const qty = parseInt(quantities[i]);
                 const price = parseInt(prices[i]);
-                
+
                 // Check stock
                 if (qty > product.stock) {
                     this.showNotification(`Không đủ hàng cho sản phẩm ${product.name}. Còn lại: ${product.stock}`, 'error');
                     return;
                 }
-                
+
                 items.push({
                     productId: products[i],
                     productName: product.name,
@@ -11857,14 +12034,14 @@ class HamobileBanhang {
                     price: price,
                     subtotal: qty * price
                 });
-                
+
                 total += qty * price;
-                
+
                 // Update stock
                 product.stock -= qty;
             }
         }
-        
+
         const newSale = {
             id: 'DH' + String(this.demoData.sales.length + 1).padStart(3, '0'),
             date: this.getVietnamDateKey(),
@@ -11877,17 +12054,17 @@ class HamobileBanhang {
             items: items.length,
             itemDetails: items
         };
-        
+
         this.demoData.sales.unshift(newSale);
         this.saveToLocalStorage();
         this.showNotification(`Đã tạo đơn hàng ${newSale.id} thành công`, 'success');
         this.loadPage('sales');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     // Product Management Functions  
     showAddProductForm(prefill) {
-        const supplierOptions = this.demoData.suppliers.map(s => 
+        const supplierOptions = this.demoData.suppliers.map(s =>
             `<option value="${s.id}">${s.name}</option>`
         ).join('');
         const minStockVal = (prefill && prefill.minStock !== undefined && prefill.minStock !== null) ? prefill.minStock : 1;
@@ -11895,7 +12072,7 @@ class HamobileBanhang {
         const importPriceVal = (prefill && prefill.importPrice != null) ? this.formatPrice(prefill.importPrice) : '';
         const priceVal = (prefill && prefill.price != null) ? this.formatPrice(prefill.price) : '';
         const isImeiMode = !!(prefill && prefill.hasImei);
-        
+
         const formHTML = `
             <div id="add-product-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) { var m=document.getElementById('add-product-modal'); if(m)m.remove(); }">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw; max-height: 90vh; overflow-y: auto;" onclick="event.stopPropagation()">
@@ -12043,7 +12220,7 @@ class HamobileBanhang {
         document.getElementById('quick-add-supplier-modal').remove();
         this.showNotification(`Đã thêm nhà cung cấp "${name}" và chọn trong form.`, 'success');
     }
-    
+
     addProductFromForm(form, createAnother) {
         this.clearFieldErrors(form);
         if (!this.validateFormProduct(form)) return;
@@ -12053,7 +12230,7 @@ class HamobileBanhang {
         const imeis = imeiRaw ? imeiRaw.split(/[\n,;]+/).map(v => v.trim()).filter(v => v.length > 0) : [];
         const stockModeImei = !!formData.get('stockModeImei');
         const hasImei = stockModeImei && imeis.length > 0;
-        
+
         const nextIndex = this.demoData.products.length;
         const fallbackId = 'SP' + String(nextIndex + 1).padStart(3, '0');
         const draftProduct = {
@@ -12076,7 +12253,7 @@ class HamobileBanhang {
             hasImei,
             imeis: hasImei ? imeis : []
         };
-        
+
         this.demoData.products.push(newProduct);
         this.saveToLocalStorage();
         this.showNotification(`Đã thêm sản phẩm ${newProduct.name}`, 'success');
@@ -12143,11 +12320,11 @@ class HamobileBanhang {
             return;
         }
 
-        const supplierOptions = this.demoData.suppliers.map(s => 
+        const supplierOptions = this.demoData.suppliers.map(s =>
             `<option value="${s.id}" ${s.id === product.supplier ? 'selected' : ''}>${s.name}</option>`
         ).join('');
         const imeiText = (product.imeis && product.imeis[0]) ? product.imeis[0] : (product.imei || '');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw; max-height: 90vh; overflow-y: auto;" onclick="event.stopPropagation()">
@@ -12184,11 +12361,11 @@ class HamobileBanhang {
                         </div>
                         <div style="margin-bottom: 16px;">
                             <label style="display: block; margin-bottom: 8px; font-weight: 600;">Giá nhập:</label>
-                            <input type="text" class="price-input" name="importPrice" value="${(product.importPrice||0).toLocaleString('vi-VN')}" required onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px;" inputmode="numeric">
+                            <input type="text" class="price-input" name="importPrice" value="${(product.importPrice || 0).toLocaleString('vi-VN')}" required onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px;" inputmode="numeric">
                         </div>
                         <div style="margin-bottom: 16px;">
                             <label style="display: block; margin-bottom: 8px; font-weight: 600;">Giá bán:</label>
-                            <input type="text" class="price-input" name="price" value="${(product.price||0).toLocaleString('vi-VN')}" required onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px;" inputmode="numeric">
+                            <input type="text" class="price-input" name="price" value="${(product.price || 0).toLocaleString('vi-VN')}" required onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px;" inputmode="numeric">
                         </div>
                         <div data-stock-mode="quantity" style="display: ${product.hasImei ? 'none' : 'grid'}; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
                             <div>
@@ -12247,7 +12424,7 @@ class HamobileBanhang {
         const stockModeImei = !!formData.get('stockModeImei');
         const existingImeis = (existingProduct.imeis && Array.isArray(existingProduct.imeis)) ? [...existingProduct.imeis] : (existingProduct.imei ? [existingProduct.imei] : []);
         const imeis = imeiRaw.length > 0 ? [imeiRaw] : existingImeis;
-        
+
         const currentDraft = {
             ...existingProduct,
             id: productId,
@@ -12269,11 +12446,11 @@ class HamobileBanhang {
             hasImei: stockModeImei,
             imeis: imeis
         };
-        
+
         this.saveToLocalStorage();
         this.showNotification(`Đã cập nhật sản phẩm ${formData.get('name')}`, 'success');
         this.loadPage('products');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
 
     calcEan13CheckDigit(data12) {
@@ -12331,7 +12508,7 @@ class HamobileBanhang {
         });
         return options;
     }
-    
+
     // Supplier Management Functions
     showAddSupplierForm() {
         const formHTML = `
@@ -12449,14 +12626,14 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     toggleSupplierFields(supplierType) {
         const codeField = document.getElementById('supplier-code-field');
         const taxField = document.getElementById('supplier-tax-field');
         const legalFields = document.getElementById('legal-info-fields');
         const bankSection = document.getElementById('bank-info-section');
         const codeInput = document.querySelector('input[name="supplierCode"]');
-        
+
         if (supplierType === 'doanh-nghiep') {
             codeField.style.display = 'block';
             taxField.style.display = 'block';
@@ -12485,7 +12662,7 @@ class HamobileBanhang {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const newSupplier = {
             id: 'NCC' + String(this.demoData.suppliers.length + 1).padStart(3, '0'),
             name: formData.get('name'),
@@ -12503,23 +12680,23 @@ class HamobileBanhang {
             notes: formData.get('notes') || '',
             products: 'Chưa có sản phẩm'
         };
-        
+
         this.demoData.suppliers.push(newSupplier);
         this.saveToLocalStorage();
         this.showNotification(`Đã thêm nhà cung cấp ${newSupplier.name}`, 'success');
         this.loadPage('suppliers');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     editSupplier(index) {
         const supplier = this.demoData.suppliers[index];
         const supplierType = supplier.type || 'ca-nhan';
-        
+
         const codeDisplay = supplierType === 'doanh-nghiep' ? 'block' : 'none';
         const taxDisplay = supplierType === 'doanh-nghiep' ? 'block' : 'none';
         const legalDisplay = supplierType === 'doanh-nghiep' ? 'grid' : 'none';
         const bankDisplay = supplierType === 'doanh-nghiep' ? 'block' : 'none';
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 700px; max-width: 95vw; max-height: 90vh; overflow-y: auto;" onclick="event.stopPropagation()">
@@ -12641,7 +12818,7 @@ class HamobileBanhang {
         const legalFields = document.getElementById('edit-legal-info-fields');
         const bankSection = document.getElementById('edit-bank-info-section');
         const codeInput = document.querySelector('input[name="supplierCode"]');
-        
+
         if (supplierType === 'doanh-nghiep') {
             codeField.style.display = 'block';
             taxField.style.display = 'block';
@@ -12670,7 +12847,7 @@ class HamobileBanhang {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         this.demoData.suppliers[index] = {
             ...this.demoData.suppliers[index],
             name: formData.get('name'),
@@ -12687,11 +12864,11 @@ class HamobileBanhang {
             bankBranch: formData.get('bankBranch') || '',
             notes: formData.get('notes') || ''
         };
-        
+
         this.saveToLocalStorage();
         this.showNotification(`Đã cập nhật nhà cung cấp ${this.demoData.suppliers[index].name}`, 'success');
         this.loadPage('suppliers');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
 
     toggleSupplierSearch() {
@@ -12778,12 +12955,12 @@ class HamobileBanhang {
         if (index === -1) { this.showNotification('Không tìm thấy nhà cung cấp để xóa', 'error'); return; }
         this.deleteSupplier(index);
     }
-    
+
     showCreatePurchaseForm() {
-        const supplierOptions = this.demoData.suppliers.map(s => 
+        const supplierOptions = this.demoData.suppliers.map(s =>
             `<option value="${s.id}">${s.name}</option>`
         ).join('');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -12820,17 +12997,17 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     createPurchaseOrder(event) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const supplier = this.demoData.suppliers.find(s => s.id === formData.get('supplier'));
         const productName = formData.get('productName');
         const quantity = parseInt(formData.get('quantity'));
         const price = this.parsePrice(formData.get('price'));
-        
+
         // Check if product exists, if not create new one
         let product = this.demoData.products.find(p => p.name.toLowerCase() === productName.toLowerCase());
         if (!product) {
@@ -12846,12 +13023,12 @@ class HamobileBanhang {
         } else {
             product.stock += quantity;
         }
-        
+
         this.saveToLocalStorage();
         this.showNotification(`Đã tạo đơn mua hàng từ ${supplier.name}`, 'success');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     // Categories Management
     getCategoriesContent() {
         const defaultCats = [
@@ -12866,7 +13043,7 @@ class HamobileBanhang {
         const categories = (this.demoData.categories && this.demoData.categories.length) ? this.demoData.categories : defaultCats;
 
         const categoryTree = this.buildCategoryTree(categories);
-        
+
         return `
             <div class="fade-in">
                 <div class="stats-grid" style="margin-bottom: 24px;">
@@ -12917,11 +13094,11 @@ class HamobileBanhang {
         const tree = [];
         const categoryMap = {};
         const isRoot = (c) => c.parent === null || c.parent === undefined || c.parent === '';
-        
+
         categories.forEach(cat => {
             categoryMap[cat.id] = { ...cat, children: [] };
         });
-        
+
         categories.forEach(cat => {
             if (isRoot(cat)) {
                 tree.push(categoryMap[cat.id]);
@@ -12931,7 +13108,7 @@ class HamobileBanhang {
                 tree.push(categoryMap[cat.id]);
             }
         });
-        
+
         return tree;
     }
 
@@ -12939,7 +13116,7 @@ class HamobileBanhang {
         return tree.map(category => {
             const indent = '&nbsp;&nbsp;'.repeat(level * 4);
             const hasChildren = category.children.length > 0;
-            
+
             let html = `
                 <div class="activity-item" style="margin-left: ${level * 20}px;">
                     <div class="activity-icon ${level === 0 ? 'success' : 'info'}">${level === 0 ? '📂' : '📁'}</div>
@@ -12953,11 +13130,11 @@ class HamobileBanhang {
                     </div>
                 </div>
             `;
-            
+
             if (hasChildren) {
                 html += this.renderCategoryTree(category.children, level + 1);
             }
-            
+
             return html;
         }).join('');
     }
@@ -12989,7 +13166,7 @@ class HamobileBanhang {
         const categories = (this.demoData.categories || []).length ? this.demoData.categories : [];
         const parentCategories = categories.filter(c => this._isCategoryRoot(c) || !this._getCategoryById(c.parent));
         const parentOptions = parentCategories.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -13040,13 +13217,13 @@ class HamobileBanhang {
             parent: null,
             level: 0
         };
-        
+
         categories.push(newCategory);
         this.demoData.categories = categories;
         this.saveToLocalStorage();
         this.showNotification(`Đã thêm danh mục "${categoryName}"`, 'success');
         this.loadPage('categories');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
 
     addSubCategory(event) {
@@ -13071,24 +13248,24 @@ class HamobileBanhang {
             parent: parentId,
             level: 1
         };
-        
+
         categories.push(newCategory);
         this.demoData.categories = categories;
         this.saveToLocalStorage();
         this.showNotification(`Đã thêm danh mục con "${categoryName}"`, 'success');
         this.loadPage('categories');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
 
     editCategory(categoryId) {
         const categories = (this.demoData.categories || []).length ? this.demoData.categories : [];
         const category = categories.find(c => c.id === categoryId);
-        
+
         if (!category) {
             this.showNotification('Không tìm thấy danh mục', 'error');
             return;
         }
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -13133,8 +13310,8 @@ class HamobileBanhang {
             this.saveToLocalStorage();
             this.showNotification(`Đã cập nhật danh mục "${categoryName}"`, 'success');
             this.loadPage('categories');
-            const modal = form.closest("div[style*=\"fixed\"]"); 
-            if(modal) modal.remove();
+            const modal = form.closest("div[style*=\"fixed\"]");
+            if (modal) modal.remove();
         } else {
             this.showNotification('Không tìm thấy danh mục để cập nhật', 'error');
         }
@@ -13148,7 +13325,7 @@ class HamobileBanhang {
             cancelLabel: 'Hủy',
             variant: 'danger',
         }))) return;
-        
+
         const categories = this.demoData.categories || [];
         const updatedCategories = categories.filter(c => c.id !== categoryId && c.parent !== categoryId);
         this.demoData.categories = updatedCategories;
@@ -13242,23 +13419,23 @@ class HamobileBanhang {
             { id: 'cat7', name: 'Pickle Ball', parent: 'cat5', level: 1 }
         ];
         const categories = (this.demoData.categories && this.demoData.categories.length) ? this.demoData.categories : defaultCats;
-        
+
         let options = '<option value="">Chọn danh mục</option>';
         const allNames = categories.map(c => (c.name || '').trim()).filter(Boolean);
         const nameCount = {};
         allNames.forEach(n => { nameCount[n] = (nameCount[n] || 0) + 1; });
         const parentNameOccurrence = {};
-        
+
         const parentCategories = categories.filter(c => this._isCategoryRoot(c) || !this._getCategoryById(c.parent));
         const childCategories = categories.filter(c => !this._isCategoryRoot(c) && this._getCategoryById(c.parent));
-        
+
         parentCategories.forEach(parent => {
             const children = childCategories.filter(c => c.parent === parent.id);
             const pName = parent.name || '';
             const pCount = nameCount[pName] || 0;
             parentNameOccurrence[pName] = (parentNameOccurrence[pName] || 0) + 1;
             const parentLabel = pCount > 1 && parentNameOccurrence[pName] > 1 ? `${pName} (${parentNameOccurrence[pName]})` : pName;
-            
+
             if (children.length > 0) {
                 options += `<optgroup label="${pName.replace(/"/g, '&quot;')}">`;
                 options += `<option value="${pName.replace(/"/g, '&quot;')}">${parentLabel.replace(/</g, '&lt;')}</option>`;
@@ -13272,7 +13449,7 @@ class HamobileBanhang {
                 options += `<option value="${pName.replace(/"/g, '&quot;')}">${parentLabel.replace(/</g, '&lt;')}</option>`;
             }
         });
-        
+
         return options;
     }
 
@@ -13281,11 +13458,11 @@ class HamobileBanhang {
         const modal = document.createElement('div');
         modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;';
         modal.onclick = () => modal.remove();
-        
+
         const content = document.createElement('div');
         content.style.cssText = 'background: white; padding: 32px; border-radius: 12px; width: 400px; max-width: 90vw;';
         content.onclick = (e) => e.stopPropagation();
-        
+
         content.innerHTML = `
             <h3 style="margin-bottom: 24px; color: var(--text-primary); text-align: center;">${title}</h3>
             <p style="margin-bottom: 24px; text-align: center; color: #666;">Bạn muốn xem dữ liệu hay tải về file?</p>
@@ -13304,28 +13481,28 @@ class HamobileBanhang {
             
 
         `;
-        
+
         modal.appendChild(content);
         document.body.appendChild(modal);
-        
+
         // Add event listeners
         content.querySelector('#viewBtn').onclick = () => {
             this[generateFunction]('view');
             modal.remove();
         };
-        
+
         content.querySelector('#downloadBtn').onclick = () => {
             this[generateFunction]('download');
             modal.remove();
         };
-        
+
 
     }
 
     // Generic data viewer function
     showDataViewer(title, data, columns) {
         const tableHeaders = columns.map(col => `<th style="padding: 12px; background: var(--primary-blue); color: white; text-align: left; border-bottom: 2px solid #1e40af;">${col.header}</th>`).join('');
-        
+
         const tableRows = data.map((row, index) => {
             const cells = columns.map(col => {
                 const value = col.getValue(row, index);
@@ -13333,7 +13510,7 @@ class HamobileBanhang {
             }).join('');
             return `<tr>${cells}</tr>`;
         }).join('');
-        
+
         const viewerHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 90%; max-width: 1200px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
@@ -13365,23 +13542,23 @@ class HamobileBanhang {
     showProductDetail(productId) {
         console.log('Showing product detail for ID:', productId);
         console.log('Available products:', this.demoData.products.map(p => p.id));
-        
+
         const product = this.demoData.products.find(p => p.id === productId);
         if (!product) {
             console.error('Product not found:', productId);
             this.showNotification('Không tìm thấy sản phẩm', 'error');
             return;
         }
-        
+
         console.log('Found product:', product);
-        
+
         const isImei = product.hasImei && product.imeis && product.imeis.length > 0;
         const effectiveStock = isImei ? (product.stock != null ? product.stock : product.imeis.length) : (product.stock || 0);
         const profit = product.importPrice ? product.price - product.importPrice : 0;
         const profitPercent = product.importPrice ? ((profit / product.importPrice) * 100).toFixed(1) : 0;
         const totalValue = product.price * effectiveStock;
         const totalCost = product.importPrice ? product.importPrice * effectiveStock : 0;
-        
+
         const detailHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 900px; max-width: 95vw;" onclick="event.stopPropagation()">
@@ -13455,17 +13632,17 @@ class HamobileBanhang {
     generateCode39Svg(value, width = 260, height = 56) {
         // Kept name for backward compatibility, now renders Code 128-B.
         const CODE128_PATTERNS = [
-            '212222','222122','222221','121223','121322','131222','122213','122312','132212','221213',
-            '221312','231212','112232','122132','122231','113222','123122','123221','223211','221132',
-            '221231','213212','223112','312131','311222','321122','321221','312212','322112','322211',
-            '212123','212321','232121','111323','131123','131321','112313','132113','132311','211313',
-            '231113','231311','112133','112331','132131','113123','113321','133121','313121','211331',
-            '231131','213113','213311','213131','311123','311321','331121','312113','312311','332111',
-            '314111','221411','431111','111224','111422','121124','121421','141122','141221','112214',
-            '112412','122114','122411','142112','142211','241211','221114','413111','241112','134111',
-            '111242','121142','121241','114212','124112','124211','411212','421112','421211','212141',
-            '214121','412121','111143','111341','131141','114113','114311','411113','411311','113141',
-            '114131','311141','411131','211412','211214','211232','2331112'
+            '212222', '222122', '222221', '121223', '121322', '131222', '122213', '122312', '132212', '221213',
+            '221312', '231212', '112232', '122132', '122231', '113222', '123122', '123221', '223211', '221132',
+            '221231', '213212', '223112', '312131', '311222', '321122', '321221', '312212', '322112', '322211',
+            '212123', '212321', '232121', '111323', '131123', '131321', '112313', '132113', '132311', '211313',
+            '231113', '231311', '112133', '112331', '132131', '113123', '113321', '133121', '313121', '211331',
+            '231131', '213113', '213311', '213131', '311123', '311321', '331121', '312113', '312311', '332111',
+            '314111', '221411', '431111', '111224', '111422', '121124', '121421', '141122', '141221', '112214',
+            '112412', '122114', '122411', '142112', '142211', '241211', '221114', '413111', '241112', '134111',
+            '111242', '121142', '121241', '114212', '124112', '124211', '411212', '421112', '421211', '212141',
+            '214121', '412121', '111143', '111341', '131141', '114113', '114311', '411113', '411311', '113141',
+            '114131', '311141', '411131', '211412', '211214', '211232', '2331112'
         ];
 
         const normalized = this.normalizeCode39Value(value);
@@ -13495,6 +13672,9 @@ class HamobileBanhang {
                 x += w;
             }
         }
+        // Terminating bar (2 modules) bắt buộc sau stop character của Code 128
+        bars += `<rect x="${x}" y="0" width="2" height="${height}" fill="#111827"/>`;
+        x += 2;
         const totalWidth = x + quiet;
         return `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${height}" viewBox="0 0 ${totalWidth} ${height}" preserveAspectRatio="none" style="display:block;max-width:100%;">${bars}</svg>`;
     }
@@ -13903,10 +14083,10 @@ class HamobileBanhang {
         body.innerHTML = `
             <div style="display:grid; grid-template-columns: repeat(${st.pageSize}, 1fr); gap:8px; justify-items:center;">
                 ${pageItems.map((item) => {
-                    const meta = resolvePreviewMeta(item);
-                    const codeValue = this.getLabelSheetCodeValue(meta.product, { line2: meta.line2, code: meta.product.id }, meta.printType);
-                    const barcodeSvg = meta.canPrintBarcode ? this.generateCode39Svg(codeValue, 200, 32) : '';
-                    return `
+            const meta = resolvePreviewMeta(item);
+            const codeValue = this.getLabelSheetCodeValue(meta.product, { line2: meta.line2, code: meta.product.id }, meta.printType);
+            const barcodeSvg = meta.canPrintBarcode ? this.generateCode39Svg(codeValue, 200, 32) : '';
+            return `
                         <div style="width:170px; height:82px; background:#fff; border:1px solid #d1d5db; padding:6px; box-sizing:border-box;">
                             <div style="font-size:11px; text-align:center; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(meta.product.name || '')}</div>
                             ${meta.canPrintBarcode ? `<div style="width:100%; overflow:hidden;">${barcodeSvg}</div>` : `<div style="font-size:10px;color:#6b7280;text-align:center;">Tắt in mã vạch</div>`}
@@ -13914,7 +14094,7 @@ class HamobileBanhang {
                             ${hidePrice ? '' : `<div style="font-size:11px; font-weight:800; text-align:center;">${escapeHtml(Number(meta.product.price || 0).toLocaleString('vi-VN') + ' VND')}</div>`}
                         </div>
                     `;
-                }).join('')}
+        }).join('')}
             </div>
         `;
     }
@@ -14148,8 +14328,9 @@ class HamobileBanhang {
             return;
         }
         win.document.write(`
-            <html>
+            <html dir="ltr" lang="vi">
             <head>
+                <meta charset="UTF-8">
                 <title>In tem mã - nhiều sản phẩm</title>
                 <style>${printStyles}</style>
             </head>
@@ -14158,13 +14339,13 @@ class HamobileBanhang {
                 <script>
                     window.onafterprint = function() { window.close(); };
                     window.addEventListener('focus', function () { setTimeout(function () { window.close(); }, 200); });
+                    setTimeout(function() { window.print(); }, 120);
                 </script>
             </body>
             </html>
         `);
         win.document.close();
         win.focus();
-        setTimeout(() => win.print(), 120);
         this.showNotification(`Đang in ${labels.length} tem theo số lượng tồn của ${products.length} sản phẩm đã chọn.`, 'success');
     }
 
@@ -14339,8 +14520,9 @@ class HamobileBanhang {
             return;
         }
         win.document.write(`
-            <html>
+            <html dir="ltr" lang="vi">
             <head>
+                <meta charset="UTF-8">
                 <title>In tem mã - ${escapeHtml(product.name || product.id)}</title>
                 <style>
                     ${printStyles}
@@ -14353,22 +14535,22 @@ class HamobileBanhang {
                     window.addEventListener('focus', function () {
                         setTimeout(function () { window.close(); }, 200);
                     });
+                    setTimeout(function() { window.print(); }, 120);
                 </script>
             </body>
             </html>
         `);
         win.document.close();
         win.focus();
-        setTimeout(() => win.print(), 120);
     }
-    
+
     // Payment and Debt Management
     showPaymentForm() {
         const customersWithDebt = this.demoData.customers.filter(c => c.debt > 0);
-        const customerOptions = customersWithDebt.map(c => 
+        const customerOptions = customersWithDebt.map(c =>
             `<option value="${c.id}" data-debt="${c.debt}">${c.name} - Nợ: ${c.debt.toLocaleString('vi-VN')} VNĐ</option>`
         ).join('');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -14400,7 +14582,7 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     updateDebtAmount(selectElement) {
         const selectedOption = selectElement.options[selectElement.selectedIndex];
         const debt = selectedOption.getAttribute('data-debt') || 0;
@@ -14411,15 +14593,18 @@ class HamobileBanhang {
             debtInfo.innerHTML = '';
         }
     }
-    
+
     async recordPayment(event) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const customerId = String(formData.get('customer') || '').trim();
         const amount = parseInt(formData.get('amount'), 10);
-        
+        const paymentMethod = String(formData.get('paymentMethod') || 'Tiền mặt').trim();
+        const note = String(formData.get('note') || '').trim();
+        const printReceipt = form.querySelector('[name="printReceipt"]')?.checked ?? false;
+
         let customer = (this.demoData.customers || []).find(c =>
             String(c.id || '').trim() === customerId || String(c.name || '').trim() === customerId
         );
@@ -14429,8 +14614,41 @@ class HamobileBanhang {
         if (customer && amount > 0) {
             const oldDebt = this.getActualDebtForCustomer(customer);
             const todayStr = this.getVietnamDateKey();
-            (this.demoData.debtPayments || []).push({ customerId, customerName: customer.name, amount, date: todayStr });
-            
+            const now = new Date();
+            const paymentId = 'PTN-' + now.getFullYear() + String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0') + '-' + String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0') + String(now.getSeconds()).padStart(2, '0');
+            const newDebt = Math.max(0, oldDebt - amount);
+
+            const paymentRecord = {
+                id: paymentId,
+                customerId: String(customer.id || customerId).trim(),
+                customerName: customer.name,
+                amount: amount,
+                debtBefore: oldDebt,
+                debtAfter: newDebt,
+                paymentMethod: paymentMethod,
+                createdByName: (this.currentUser && (this.currentUser.name || this.currentUser.username)) || 'Thu ngân',
+                createdAt: now.toISOString(),
+                date: todayStr,
+                note: note
+            };
+
+            if (!this.demoData.debtPayments) this.demoData.debtPayments = [];
+            this.demoData.debtPayments.push(paymentRecord);
+
+            // Tự động ghi vào Sổ Quỹ Thu Chi nếu có bảng cashBook
+            if (this.demoData.cashBook && Array.isArray(this.demoData.cashBook)) {
+                this.demoData.cashBook.push({
+                    id: 'SQT-' + paymentId,
+                    type: 'INCOME',
+                    category: 'Thu nợ khách hàng',
+                    amount: amount,
+                    paymentMethod: paymentMethod,
+                    customerName: customer.name,
+                    date: todayStr,
+                    note: `Thu nợ từ ${customer.name} (Mã phiếu: ${paymentId})`
+                });
+            }
+
             let remaining = amount;
             const matchC = (o) => {
                 const oid = String((o && o.customerId) || '').trim();
@@ -14463,13 +14681,13 @@ class HamobileBanhang {
                 if (r.amountPaid >= cost) r.paymentStatus = 'Đã thanh toán';
                 remaining -= pay;
             });
-            
+
             this.syncCustomerDebt();
             customer.debt = this.getActualDebtForCustomer(customer);
             this.updateDebtorsList();
             const saved = await this.saveToFirebaseImmediate();
             if (!saved) this.saveToLocalStorage();
-            
+
             let syncMessage = '';
             if (customer.debt === 0 && amount >= oldDebt) {
                 const parts = [];
@@ -14477,17 +14695,22 @@ class HamobileBanhang {
                 if (unpaidRepairs.length > 0) parts.push(`${unpaidRepairs.length} phiếu sửa chữa`);
                 if (parts.length > 0) syncMessage = ` và cập nhật ${parts.join(', ')} thành "Đã thanh toán"`;
             }
-            
-            this.showNotification(`✅ Đã ghi nhận thanh toán ${amount.toLocaleString('vi-VN')} VNĐ từ ${customer.name}. Nợ còn lại: ${customer.debt.toLocaleString('vi-VN')} VNĐ${syncMessage}`, 'success');
-            
-            // Delay để đảm bảo dữ liệu được cập nhật
+
+            this.showNotification(`Đã ghi nhận thanh toán ${amount.toLocaleString('vi-VN')} VNĐ từ ${customer.name}. Nợ còn lại: ${customer.debt.toLocaleString('vi-VN')} VNĐ${syncMessage}`, 'success');
+
+            if (printReceipt) {
+                setTimeout(() => {
+                    this.printDebtPaymentReceipt(paymentId);
+                }, 200);
+            }
+
             setTimeout(() => {
                 this.loadPage('debts');
             }, 100);
         }
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     // Hiển thị form thanh toán với khách hàng được chọn sẵn
     showPaymentFormForCustomer(customerId) {
         const cid = String(customerId || '').trim();
@@ -14505,28 +14728,59 @@ class HamobileBanhang {
         const actualDebt = this.getActualDebtForCustomer(customer);
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
-                <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
-                    <h3 style="margin-bottom: 24px; color: var(--text-primary);">Ghi nhận thanh toán - ${customer.name}</h3>
+                <div style="background: white; padding: 28px; border-radius: 12px; width: 520px; max-width: 92vw; box-shadow: 0 10px 25px rgba(0,0,0,0.2);" onclick="event.stopPropagation()">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h3 style="margin: 0; color: var(--text-primary); font-size: 18px;">💳 Ghi nhận thanh toán - ${escapeHtml(customer.name)}</h3>
+                        <button onclick="closeModal(this.closest('div[style*=fixed]'))" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #6b7280;">&times;</button>
+                    </div>
                     <form onsubmit="app.recordPayment(event)">
                         <input type="hidden" name="customer" value="${escapeHtml(payCustomerKey)}">
-                        <div style="margin-bottom: 16px;">
-                            <label style="display: block; margin-bottom: 8px; font-weight: 600;">Khách hàng:</label>
-                            <input type="text" value="${customer.name} (${customer.id})" disabled style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px; background: #f9fafb;">
+                        <div style="margin-bottom: 14px;">
+                            <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">Khách hàng:</label>
+                            <input type="text" value="${escapeHtml(customer.name)} (${escapeHtml(customer.id || '-')})" disabled style="width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; background: #f9fafb; font-weight: 600;">
                         </div>
-                        <div style="margin-bottom: 16px;">
-                            <label style="display: block; margin-bottom: 8px; font-weight: 600;">Số tiền thanh toán:</label>
-                            <input type="number" name="amount" required min="0" max="${actualDebt}" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px;" placeholder="Tối đa: ${actualDebt.toLocaleString('vi-VN')} VNĐ">
-                        </div>
-                        <div style="margin-bottom: 24px;">
-                            <div style="padding: 12px; background: #fef3c7; border-radius: 8px; color: #92400e;">
-                                <strong>Tổng nợ hiện tại: ${actualDebt.toLocaleString('vi-VN')} VNĐ</strong> (đơn hàng + sửa chữa)
+                        <div style="margin-bottom: 14px;">
+                            <div style="padding: 12px; background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px; color: #92400e; display: flex; justify-content: space-between; align-items: center;">
+                                <span>Tổng nợ hiện tại:</span>
+                                <strong style="font-size: 16px; color: #dc2626;">${actualDebt.toLocaleString('vi-VN')} VNĐ</strong>
                             </div>
                         </div>
+                        <div style="margin-bottom: 14px;">
+                            <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">Số tiền thanh toán (VNĐ):</label>
+                            <input type="number" id="debtPaymentAmountInput" name="amount" required min="1" max="${actualDebt}" style="width: 100%; padding: 10px 12px; border: 2px solid #3b82f6; border-radius: 8px; font-size: 16px; font-weight: 700; color: #1e40af;" placeholder="Tối đa: ${actualDebt.toLocaleString('vi-VN')} VNĐ" value="${actualDebt}">
+                            <div style="display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;">
+                                ${actualDebt >= 500000 ? `<button type="button" onclick="document.getElementById('debtPaymentAmountInput').value=500000" style="padding: 4px 8px; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 4px; font-size: 12px; cursor: pointer;">500k</button>` : ''}
+                                ${actualDebt >= 1000000 ? `<button type="button" onclick="document.getElementById('debtPaymentAmountInput').value=1000000" style="padding: 4px 8px; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 4px; font-size: 12px; cursor: pointer;">1 Triệu</button>` : ''}
+                                ${actualDebt >= 2000000 ? `<button type="button" onclick="document.getElementById('debtPaymentAmountInput').value=2000000" style="padding: 4px 8px; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 4px; font-size: 12px; cursor: pointer;">2 Triệu</button>` : ''}
+                                <button type="button" onclick="document.getElementById('debtPaymentAmountInput').value=${actualDebt}" style="padding: 4px 8px; background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer;">Trả hết nợ</button>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 14px;">
+                            <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">Hình thức thanh toán:</label>
+                            <div style="display: flex; gap: 16px; align-items: center;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                    <input type="radio" name="paymentMethod" value="Tiền mặt" checked> 💵 Tiền mặt
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                    <input type="radio" name="paymentMethod" value="Chuyển khoản"> 🏦 Chuyển khoản
+                                </label>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 16px;">
+                            <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">Ghi chú thanh toán:</label>
+                            <input type="text" name="note" style="width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px;" placeholder="Ví dụ: Khách chuyển khoản VCB, trả đợt 1...">
+                        </div>
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: #374151;">
+                                <input type="checkbox" name="printReceipt" value="1" checked style="width: 16px; height: 16px;">
+                                🖨️ Tự động in Phiếu Thu Nợ sau khi ghi nhận
+                            </label>
+                        </div>
                         <div style="display: flex; gap: 12px; justify-content: flex-end;">
-                            <button type="button" onclick="closeModal(this.closest('div[style*=fixed]'))" 
-                                    style="padding: 12px 24px; border: 2px solid #e5e7eb; background: white; border-radius: 8px; cursor: pointer;">Hủy</button>
-                            <button type="submit" 
-                                    style="padding: 12px 24px; background: var(--primary-blue); color: white; border: none; border-radius: 8px; cursor: pointer;">Ghi nhận</button>
+                            <button type="button" onclick="closeModal(this.closest('div[style*=fixed]'))"
+                                    style="padding: 10px 20px; border: 1px solid #d1d5db; background: white; border-radius: 8px; cursor: pointer; font-weight: 600;">Hủy</button>
+                            <button type="submit"
+                                    style="padding: 10px 20px; background: #059669; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600;">💾 Ghi nhận & Lưu</button>
                         </div>
                     </form>
                 </div>
@@ -14534,7 +14788,7 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     // Tạo dữ liệu sản phẩm demo từ tổng tiền đơn hàng
     generateOrderItemsFromTotal(total) {
         const sampleProducts = [
@@ -14549,28 +14803,28 @@ class HamobileBanhang {
             { name: 'Loa Bluetooth JBL', price: 3000000, sku: 'JBL001' },
             { name: 'Đế tản nhiệt laptop', price: 800000, sku: 'FAN001' }
         ];
-        
+
         const items = [];
         let remainingTotal = total;
         let attempts = 0;
-        
+
         // Tạo 1-4 sản phẩm ngẫu nhiên
         const numItems = Math.min(Math.floor(Math.random() * 3) + 1, 4);
-        
+
         for (let i = 0; i < numItems && remainingTotal > 0 && attempts < 10; i++) {
             const product = sampleProducts[Math.floor(Math.random() * sampleProducts.length)];
-            
+
             // Tính số lượng phù hợp
             const maxQty = Math.min(Math.floor(remainingTotal / product.price), 5);
             const quantity = maxQty > 0 ? Math.floor(Math.random() * maxQty) + 1 : 1;
-            
+
             // Điều chỉnh giá để phù hợp với số tiền còn lại
             let itemPrice = product.price;
             if (i === numItems - 1) {
                 // Sản phẩm cuối cùng: điều chỉnh giá để tổng khớp
                 itemPrice = Math.floor(remainingTotal / quantity);
             }
-            
+
             const itemTotal = quantity * itemPrice;
             if (itemTotal <= remainingTotal) {
                 items.push({
@@ -14584,16 +14838,16 @@ class HamobileBanhang {
             }
             attempts++;
         }
-        
+
         if (remainingTotal > 0 && items.length > 0) {
             const lastItem = items[items.length - 1];
             const extraPerUnit = Math.floor(remainingTotal / lastItem.quantity);
             lastItem.price += extraPerUnit;
         }
-        
+
         return items;
     }
-    
+
     // Hiển thị chi tiết đơn hàng (dùng order.products - sản phẩm thực trong kho, KHÔNG sinh dữ liệu giả)
     showOrderDetail(orderId) {
         const order = this.demoData.orders.find(o => o.id === orderId);
@@ -14601,12 +14855,12 @@ class HamobileBanhang {
             this.showNotification('Không tìm thấy đơn hàng', 'error');
             return;
         }
-        
+
         let customer = this.demoData.customers.find(c => c.id === order.customerId);
-        
+
         // Dùng order.products (sản phẩm thực từ kho) - KHÔNG dùng order.items hay generateOrderItemsFromTotal (sản phẩm giả không có trong kho)
         const orderProducts = order.products || [];
-        const orderItemsHTML = orderProducts.length > 0 ? 
+        const orderItemsHTML = orderProducts.length > 0 ?
             orderProducts.map(op => {
                 const prod = this.demoData.products.find(p => p.id === (op.id || op.productId));
                 const productName = op.name || op.productName || (prod ? prod.name : '-');
@@ -14633,7 +14887,7 @@ class HamobileBanhang {
                 `;
             }).join('') :
             '<tr><td colspan="4" style="padding: 20px; text-align: center; color: #6b7280;">Không có sản phẩm trong đơn</td></tr>';
-        
+
         const orderDetailHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1002; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 900px; max-width: 95vw; max-height: 90vh; overflow-y: auto;" onclick="event.stopPropagation()">
@@ -14731,14 +14985,14 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', orderDetailHTML);
     }
 
     closeDebtsMobileDetail() {
         const el = document.getElementById('debts-mobile-detail-root');
         if (el) el.remove();
-        try { document.body.style.overflow = ''; } catch (_) {}
+        try { document.body.style.overflow = ''; } catch (_) { }
     }
 
     /** Màn chi tiết công nợ dạng app mobile (full screen) */
@@ -14888,9 +15142,9 @@ class HamobileBanhang {
                 </footer>
             </div>`;
         document.body.insertAdjacentHTML('beforeend', html);
-        try { document.body.style.overflow = 'hidden'; } catch (_) {}
+        try { document.body.style.overflow = 'hidden'; } catch (_) { }
     }
-    
+
     // Hiển thị chi tiết công nợ khách hàng (đơn hàng + sửa chữa)
     showCustomerDebtDetail(customerId) {
         const isMobile =
@@ -14908,14 +15162,14 @@ class HamobileBanhang {
         if (!customer) customer = this.getCustomersWithDebt().find(c =>
             String(c.id || '').trim() === cid || String(c.name || '').trim() === cid
         );
-        
+
         if (!customer) {
             this.showNotification('Không tìm thấy khách hàng', 'error');
             return;
         }
-        
+
         const actualDebt = this.getActualDebtForCustomer(customer);
-        
+
         // Đơn hàng chưa thanh toán
         const unpaidOrders = this.demoData.orders.filter(order => {
             const matchById = String(order.customerId || '').trim() === String(customer.id || '').trim() || String(order.customerId || '').trim() === cid;
@@ -14923,8 +15177,8 @@ class HamobileBanhang {
             const isUnpaid = order.paymentStatus === 'Công nợ' || order.status === 'Công nợ';
             return (matchById || matchByName) && isUnpaid;
         });
-        
-        // Phiếu sửa chữa đang nợ (Đã trả + paid < cost - đồng bộ với cột Thanh toán)
+
+        // Phiếu sửa chữa đang nợ (đã trả + paid < cost - đồng bộ với cột Thanh toán)
         const unpaidRepairs = (this.demoData.repairs || []).filter(r => {
             if ((r.status || '') !== 'Đã trả') return false;
             const cost = Number(r.repairCost) || 0;
@@ -14934,8 +15188,15 @@ class HamobileBanhang {
                 || String(r.customerId || '').trim() === cid
                 || r.customerName === customer.name || r.customerId === customer.name || r.customerName === customer.id;
         });
-        
-        const unpaidOrdersHTML = unpaidOrders.length > 0 ? 
+
+        // Lịch sử các lần thanh toán nợ của khách hàng
+        const customerPayments = (this.demoData.debtPayments || []).filter(p => {
+            const pCid = String(p.customerId || '').trim();
+            const pCName = String(p.customerName || '').trim();
+            return pCid === cid || pCid === String(customer.id || '').trim() || pCName === String(customer.name || '').trim();
+        }).sort((a, b) => new Date(b.createdAt || b.date) - new Date(a.createdAt || a.date));
+
+        const unpaidOrdersHTML = unpaidOrders.length > 0 ?
             unpaidOrders.map(order => {
                 const orderIndex = this.demoData.orders.findIndex(o => o.id === order.id);
                 return `
@@ -14952,13 +15213,13 @@ class HamobileBanhang {
                     </td>
                     <td style="padding: 12px; text-align: center;">
                         <button onclick="closeModal(this.closest('div[style*=fixed]')); app.viewOrderDetails(${orderIndex})" style="
-                            background: #3b82f6; 
-                            color: white; 
-                            border: none; 
-                            padding: 6px 12px; 
-                            border-radius: 4px; 
-                            cursor: pointer; 
-                            font-size: 12px; 
+                            background: #3b82f6;
+                            color: white;
+                            border: none;
+                            padding: 6px 12px;
+                            border-radius: 4px;
+                            cursor: pointer;
+                            font-size: 12px;
                             font-weight: 600;
                         ">
                             Chi tiết
@@ -14968,6 +15229,7 @@ class HamobileBanhang {
             `;
             }).join('') :
             '<tr><td colspan="5" style="padding: 20px; text-align: center; color: #6b7280;">Không có đơn hàng nào đang nợ</td></tr>';
+
         const unpaidRepairsHTML = unpaidRepairs.length > 0 ? unpaidRepairs.map(r => {
             const repairIndex = this.demoData.repairs.findIndex(x => x === r);
             const debtAmount = Math.max(0, (Number(r.repairCost) || 0) - (Number(r.amountPaid) ?? 0));
@@ -14979,60 +15241,73 @@ class HamobileBanhang {
                 <td style="padding: 12px; text-align: center;"><button onclick="closeModal(this.closest('div[style*=fixed]')); app.viewRepairDetails(${repairIndex})" style="background: #3b82f6; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600;">Chi tiết</button></td>
             </tr>`;
         }).join('') : '<tr><td colspan="5" style="padding: 20px; text-align: center; color: #6b7280;">Không có phiếu sửa chữa nào đang nợ</td></tr>';
-        
+
+        const historyPaymentsHTML = customerPayments.length > 0 ? customerPayments.map(p => {
+            const timeStr = p.createdAt ? new Date(p.createdAt).toLocaleString('vi-VN') : (p.date || '-');
+            const debtChangeStr = p.debtBefore != null && p.debtAfter != null
+                ? `${p.debtBefore.toLocaleString('vi-VN')} ➔ ${p.debtAfter.toLocaleString('vi-VN')} VNĐ`
+                : '-';
+            const methodBadge = p.paymentMethod === 'Chuyển khoản'
+                ? `<span style="background: #dbeafe; color: #1e40af; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight:600;">🏦 Chuyển khoản</span>`
+                : `<span style="background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight:600;">💵 Tiền mặt</span>`;
+            return `
+                <tr style="border-bottom: 1px solid #e5e7eb;">
+                    <td style="padding: 10px; text-align: left; font-family: monospace; font-size: 12px;">${escapeHtml(p.id || '-')}</td>
+                    <td style="padding: 10px; text-align: left; font-size: 12px;">${timeStr}</td>
+                    <td style="padding: 10px; text-align: right; color: #059669; font-weight: 700; font-size: 13px;">+${(p.amount || 0).toLocaleString('vi-VN')} VNĐ</td>
+                    <td style="padding: 10px; text-align: center; font-size: 12px;">${debtChangeStr}</td>
+                    <td style="padding: 10px; text-align: center;">${methodBadge}</td>
+                    <td style="padding: 10px; text-align: left; font-size: 12px; max-width: 150px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(p.note || '-')}</td>
+                    <td style="padding: 10px; text-align: center;">
+                        <button onclick="app.printDebtPaymentReceipt('${p.id || p.date}')" style="background: #059669; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600;">🖨️ In phiếu</button>
+                    </td>
+                </tr>
+            `;
+        }).join('') : '<tr><td colspan="7" style="padding: 16px; text-align: center; color: #6b7280; font-size: 13px;">Chưa có lịch sử thanh toán nợ nào</td></tr>';
+
         const detailHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
-                <div style="background: white; padding: 32px; border-radius: 12px; width: 800px; max-width: 95vw; max-height: 90vh; overflow-y: auto;" onclick="event.stopPropagation()">
+                <div style="background: white; padding: 32px; border-radius: 12px; width: 850px; max-width: 95vw; max-height: 90vh; overflow-y: auto;" onclick="event.stopPropagation()">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
-                        <h3 style="margin: 0; color: var(--text-primary);">📊 Chi tiết công nợ - ${customer.name}</h3>
-                        <button onclick="closeModal(this.closest('div[style*=fixed]'))" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #6b7280;">×</button>
+                        <h3 style="margin: 0; color: var(--text-primary);">👤 Chi tiết công nợ - ${escapeHtml(customer.name)}</h3>
+                        <button onclick="closeModal(this.closest('div[style*=fixed]'))" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #6b7280;">&times;</button>
                     </div>
-                    
+
                     <!-- Thông tin khách hàng -->
                     <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin-bottom: 24px;">
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                             <div>
                                 <div style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">Tên khách hàng:</div>
-                                <div style="font-weight: 600; color: var(--text-primary);">${customer.name}</div>
+                                <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(customer.name)}</div>
                                 ${customer.type === 'doanh-nghiep' && customer.companyName ? `
                                     <div style="font-size: 13px; color: #6b7280; margin-top: 4px;">
-                                        <div><strong>Công ty:</strong> ${customer.companyName}</div>
+                                        <div><strong>Công ty:</strong> ${escapeHtml(customer.companyName)}</div>
                                     </div>
                                 ` : ''}
                             </div>
                             <div>
                                 <div style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">Mã khách hàng:</div>
-                                <div style="font-weight: 600; color: var(--text-primary);">${customer.id}</div>
-                                ${customer.type === 'doanh-nghiep' && customer.department ? `
-                                    <div style="font-size: 13px; color: #6b7280; margin-top: 4px;">
-                                        <div><strong>Phòng ban:</strong> ${customer.department}</div>
-                                    </div>
-                                ` : ''}
+                                <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(customer.id || '-')}</div>
                             </div>
                             <div>
                                 <div style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">Số điện thoại:</div>
-                                <div style="font-weight: 600; color: var(--text-primary);">${customer.phone}</div>
-                                ${customer.type === 'doanh-nghiep' && customer.taxCode ? `
-                                    <div style="font-size: 13px; color: #6b7280; margin-top: 4px;">
-                                        <div><strong>MST:</strong> ${customer.taxCode}</div>
-                                    </div>
-                                ` : ''}
+                                <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(customer.phone || '-')}</div>
                             </div>
                             <div>
-                                <div style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">Tổng công nợ:</div>
-                                <div style="font-weight: 700; color: #dc2626; font-size: 18px;">${this.getActualDebtForCustomer(customer).toLocaleString('vi-VN')} VNĐ</div>
+                                <div style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">Tổng công nợ hiện tại:</div>
+                                <div style="font-weight: 700; color: #dc2626; font-size: 18px;">${actualDebt.toLocaleString('vi-VN')} VNĐ</div>
                             </div>
                         </div>
                         <div style="margin-top: 16px;">
                             <div style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">Địa chỉ:</div>
-                            <div style="font-weight: 600; color: var(--text-primary);">${customer.address}</div>
+                            <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(customer.address || '-')}</div>
                         </div>
                     </div>
-                    
+
                     <!-- Danh sách đơn hàng đang nợ -->
                     <div style="margin-bottom: 24px;">
                         <h4 style="margin-bottom: 16px; color: var(--text-primary);">
-                            📝 Đơn hàng đang nợ (${unpaidOrders.length} đơn)
+                            📦 Đơn hàng đang nợ (${unpaidOrders.length} đơn)
                         </h4>
                         <div style="overflow-x: auto;">
                             <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
@@ -15051,7 +15326,7 @@ class HamobileBanhang {
                             </table>
                         </div>
                     </div>
-                    
+
                     <!-- Danh sách phiếu sửa chữa đang nợ -->
                     ${unpaidRepairs.length > 0 ? `
                     <div style="margin-bottom: 24px;">
@@ -15076,38 +15351,63 @@ class HamobileBanhang {
                         </div>
                     </div>
                     ` : ''}
-                    
+
+                    <!-- Lịch sử các lần trả nợ -->
+                    <div style="margin-bottom: 24px;">
+                        <h4 style="margin-bottom: 16px; color: var(--text-primary);">
+                            📜 Lịch sử thanh toán nợ (${customerPayments.length} lần)
+                        </h4>
+                        <div style="overflow-x: auto;">
+                            <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                                <thead>
+                                    <tr style="background: #f3f4f6;">
+                                        <th style="padding: 10px; text-align: left; font-weight: 600; color: var(--text-primary); font-size: 13px;">Mã phiếu</th>
+                                        <th style="padding: 10px; text-align: left; font-weight: 600; color: var(--text-primary); font-size: 13px;">Ngày giờ</th>
+                                        <th style="padding: 10px; text-align: right; font-weight: 600; color: var(--text-primary); font-size: 13px;">Số tiền trả</th>
+                                        <th style="padding: 10px; text-align: center; font-weight: 600; color: var(--text-primary); font-size: 13px;">Dư nợ (Trước ➔ Sau)</th>
+                                        <th style="padding: 10px; text-align: center; font-weight: 600; color: var(--text-primary); font-size: 13px;">Hình thức</th>
+                                        <th style="padding: 10px; text-align: left; font-weight: 600; color: var(--text-primary); font-size: 13px;">Ghi chú</th>
+                                        <th style="padding: 10px; text-align: center; font-weight: 600; color: var(--text-primary); font-size: 13px;">Thao tác</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${historyPaymentsHTML}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
                     <div style="display: flex; gap: 12px; justify-content: space-between; margin-top: 24px;">
                         <button onclick="app.printDebtReport('${customer.id}'); closeModal(this.closest('div[style*=fixed]'));" style="
-                            background: var(--primary-green); 
-                            color: white; 
-                            border: none; 
-                            padding: 12px 24px; 
-                            border-radius: 8px; 
-                            cursor: pointer; 
+                            background: #059669;
+                            color: white;
+                            border: none;
+                            padding: 12px 24px;
+                            border-radius: 8px;
+                            cursor: pointer;
                             font-weight: 600;
                         ">
                             🖨️ IN báo cáo công nợ
                         </button>
                         <div style="display: flex; gap: 12px;">
                             <button onclick="app.showPaymentFormForCustomer('${customer.id}'); closeModal(this.closest('div[style*=fixed]'));" style="
-                                background: var(--primary-blue); 
-                                color: white; 
-                                border: none; 
-                                padding: 12px 24px; 
-                                border-radius: 8px; 
-                                cursor: pointer; 
+                                background: #2563eb;
+                                color: white;
+                                border: none;
+                                padding: 12px 24px;
+                                border-radius: 8px;
+                                cursor: pointer;
                                 font-weight: 600;
                             ">
-                                💰 Ghi nhận thanh toán
+                                💳 Ghi nhận thanh toán
                             </button>
                             <button onclick="closeModal(this.closest('div[style*=fixed]'))" style="
-                                background: #6b7280; 
-                                color: white; 
-                                border: none; 
-                                padding: 12px 24px; 
-                                border-radius: 8px; 
-                                cursor: pointer; 
+                                background: #6b7280;
+                                color: white;
+                                border: none;
+                                padding: 12px 24px;
+                                border-radius: 8px;
+                                cursor: pointer;
                                 font-weight: 600;
                             ">
                                 Đóng
@@ -15117,10 +15417,9 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
         document.body.insertAdjacentHTML('beforeend', detailHTML);
     }
-    
+
     // Toggle trạng thái công nợ/đã thanh toán cho khách hàng
     toggleCustomerDebtStatus(customerId) {
         const customer = this.demoData.customers.find(c => c.id === customerId);
@@ -15128,19 +15427,19 @@ class HamobileBanhang {
             this.showNotification('Không tìm thấy khách hàng', 'error');
             return;
         }
-        
+
         const actualDebt = this.getActualDebtForCustomer(customer);
         if (actualDebt > 0) {
             const oldDebt = actualDebt;
             customer.debt = 0;
-            
+
             // ĐỒNG BỘ 2 CHIỀU: Cập nhật đơn hàng chưa thanh toán
-            const unpaidOrders = this.demoData.orders.filter(order => 
-                (order.customerId === customerId || order.customerName === customer.name) && 
+            const unpaidOrders = this.demoData.orders.filter(order =>
+                (order.customerId === customerId || order.customerName === customer.name) &&
                 (order.paymentStatus === 'Công nợ')
             );
             unpaidOrders.forEach(order => { order.paymentStatus = 'Đã thanh toán'; });
-            
+
             // ĐỒNG BỘ 2 CHIỀU: Cập nhật phiếu sửa chữa chưa thanh toán (paid < cost)
             const unpaidRepairs = (this.demoData.repairs || []).filter(r => {
                 if ((r.status || '') !== 'Đã trả') return false;
@@ -15153,17 +15452,17 @@ class HamobileBanhang {
                 r.amountPaid = Number(r.repairCost) || 0;
                 r.paymentStatus = 'Đã thanh toán';
             });
-            
+
             const updatedOrdersCount = unpaidOrders.length;
-            
+
             this.saveToLocalStorage();
             this.refreshAllCustomerDisplays();
-            
+
             const msgParts = [`Đã đánh dấu ${customer.name} thanh toán xong ${oldDebt.toLocaleString('vi-VN')} VNĐ`];
             if (updatedOrdersCount > 0) msgParts.push(`${updatedOrdersCount} đơn hàng`);
             if (unpaidRepairs.length > 0) msgParts.push(`${unpaidRepairs.length} phiếu sửa chữa`);
             const message = msgParts.length > 1 ? msgParts.join(', ') + ' thành "Đã thanh toán"' : msgParts[0];
-            
+
             this.showNotification(message, 'success');
             this.loadPage('debts');
         } else {
@@ -15194,14 +15493,14 @@ class HamobileBanhang {
             document.body.insertAdjacentHTML('beforeend', formHTML);
         }
     }
-    
+
     // Tạo công nợ cho khách hàng
     createDebtForCustomer(event, customerId) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
         const debtAmount = parseInt(formData.get('debtAmount'));
-        
+
         const customer = this.demoData.customers.find(c => c.id === customerId);
         if (customer && debtAmount > 0) {
             customer.debt = debtAmount;
@@ -15210,9 +15509,9 @@ class HamobileBanhang {
             this.showNotification(`Đã tạo công nợ ${debtAmount.toLocaleString('vi-VN')} VNĐ cho ${customer.name}`, 'success');
             this.loadPage('debts');
         }
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     // Refresh tất cả phần hiển thị khách hàng để đồng bộ dữ liệu (không ghi đè demoData bằng cache)
     refreshAllCustomerDisplays() {
         if (this.currentPage === 'customers' || this.currentPage === 'debts') {
@@ -15224,17 +15523,118 @@ class HamobileBanhang {
             }));
         }
     }
-    
+
     exportDebtReport(mode = null) {
         this.showDebtExportWithFilter();
     }
+
+    printDebtPaymentReceipt(paymentId) {
+        const payments = this.demoData.debtPayments || [];
+        let payment = payments.find(p => String(p.id || '').trim() === String(paymentId || '').trim());
+        if (!payment) {
+            payment = payments.find(p => String(p.date || '').trim() === String(paymentId || '').trim());
+        }
+        if (!payment && payments.length > 0) {
+            payment = payments[payments.length - 1];
+        }
+        if (!payment) {
+            this.showNotification('Không tìm thấy dữ liệu phiếu thu nợ!', 'error');
+            return;
+        }
+
+        const shopInfo = (this.demoData && this.demoData.companyInfo) || {};
+        const shopName = shopInfo.name || 'CỬA HÀNG BÁN HÀNG';
+        const shopAddress = shopInfo.address || '';
+        const shopPhone = shopInfo.phone || '';
+
+        const dateStr = payment.createdAt ? new Date(payment.createdAt).toLocaleString('vi-VN') : (payment.date || '');
+        const debtBeforeStr = payment.debtBefore != null ? payment.debtBefore.toLocaleString('vi-VN') + ' VNĐ' : '-';
+        const debtAfterStr = payment.debtAfter != null ? payment.debtAfter.toLocaleString('vi-VN') + ' VNĐ' : '-';
+        const amountStr = (payment.amount || 0).toLocaleString('vi-VN') + ' VNĐ';
+
+        const printWin = window.open('', '_blank', 'width=420,height=650');
+        if (!printWin) {
+            this.showNotification('Trình duyệt chặn cửa sổ popup in. Vui lòng bỏ chặn popup!', 'warning');
+            return;
+        }
+
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Phiếu Thu Nợ - ${payment.id || ''}</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; line-height: 1.4; color: #000; margin: 0; padding: 16px; width: 80mm; box-sizing: border-box; }
+        .center { text-align: center; }
+        .bold { font-weight: bold; }
+        .header { margin-bottom: 10px; }
+        .title { font-size: 16px; font-weight: bold; margin: 12px 0 6px 0; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+        .divider { border-top: 1px dashed #444; margin: 10px 0; }
+        .row { display: flex; justify-content: space-between; margin: 5px 0; font-size: 13px; }
+        .label { color: #333; }
+        .val { font-weight: 600; text-align: right; }
+        .highlight { font-size: 15px; font-weight: 700; background: #f3f4f6; padding: 4px 6px; border-radius: 4px; }
+        .signatures { display: flex; justify-content: space-between; margin-top: 25px; font-size: 12px; }
+        .sig-box { text-align: center; width: 48%; }
+        .footer { margin-top: 25px; font-size: 11px; text-align: center; color: #555; }
+    </style>
+</head>
+<body>
+    <div class="header center">
+        <div class="bold" style="font-size: 16px;">${shopName}</div>
+        ${shopAddress ? `<div style="font-size: 11px;">ĐC: ${shopAddress}</div>` : ''}
+        ${shopPhone ? `<div style="font-size: 11px;">ĐT: ${shopPhone}</div>` : ''}
+    </div>
+    <div class="divider"></div>
+    <div class="title">PHIẾU THU TIỀN NỢ</div>
+    <div class="center" style="font-size: 11px; color: #555; margin-bottom: 10px;">Mã phiếu: <strong>${payment.id || '-'}</strong></div>
+
+    <div class="row"><span class="label">Ngày thu:</span><span class="val">${dateStr}</span></div>
+    <div class="row"><span class="label">Khách hàng:</span><span class="val">${payment.customerName || '-'}</span></div>
+    <div class="row"><span class="label">Hình thức:</span><span class="val">${payment.paymentMethod || 'Tiền mặt'}</span></div>
+    ${payment.createdByName ? `<div class="row"><span class="label">Thu ngân:</span><span class="val">${payment.createdByName}</span></div>` : ''}
+    ${payment.note ? `<div class="row"><span class="label">Ghi chú:</span><span class="val">${payment.note}</span></div>` : ''}
     
+    <div class="divider"></div>
+    <div class="row"><span class="label">Dư nợ trước thu:</span><span class="val">${debtBeforeStr}</span></div>
+    <div class="row highlight"><span class="label">SỐ TIỀN THU:</span><span class="val" style="color: #059669;">${amountStr}</span></div>
+    <div class="row highlight" style="margin-top: 4px;"><span class="label">DƯ NỢ CÒN LẠI:</span><span class="val" style="color: #dc2626;">${debtAfterStr}</span></div>
+    <div class="divider"></div>
+
+    <div class="signatures">
+        <div class="sig-box">
+            <strong>Người lập phiếu</strong><br><br><br>
+            <em style="color:#666;">(Ký, họ tên)</em>
+        </div>
+        <div class="sig-box">
+            <strong>Khách hàng</strong><br><br><br>
+            <em style="color:#666;">(Ký, họ tên)</em>
+        </div>
+    </div>
+    <div class="footer">Cảm ơn Quý khách đã thanh toán!</div>
+    <script>
+        window.onload = function() {
+            window.print();
+            setTimeout(function() { window.close(); }, 800);
+        };
+    </script>
+</body>
+</html>`;
+        printWin.document.open();
+        printWin.document.write(html);
+        printWin.document.close();
+    }
+
+    exportDebtReport(mode = null) {
+        this.showDebtExportWithFilter();
+    }
+
     // Additional Product Management Functions
     showUpdatePriceForm() {
-        const productOptions = this.demoData.products.map(p => 
+        const productOptions = this.demoData.products.map(p =>
             `<option value="${p.id}">${p.name} - Giá hiện tại: ${p.price.toLocaleString('vi-VN')} VNĐ</option>`
         ).join('');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -15263,15 +15663,15 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     submitProductUpdate(event) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const productId = formData.get('product');
         const newPrice = this.parsePrice(formData.get('price'));
-        
+
         const product = this.demoData.products.find(p => p.id === productId);
         if (product) {
             const oldPrice = product.price;
@@ -15280,9 +15680,9 @@ class HamobileBanhang {
             this.showNotification(`Đã cập nhật giá ${product.name} từ ${oldPrice.toLocaleString('vi-VN')} VNĐ thành ${newPrice.toLocaleString('vi-VN')} VNĐ`, 'success');
             this.loadPage('products');
         }
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     showOutOfStockCopyModal() {
         const getStock = (p) => (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
         const outOfStockProducts = this.demoData.products.filter(p => getStock(p) === 0);
@@ -15306,7 +15706,7 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', modalHTML);
     }
-    
+
     showLowStockCopyModal() {
         const getStock = (p) => (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
         const getMinStock = (p) => (p.hasImei && p.imeis) ? 0 : (p.minStock ?? 1);
@@ -15343,13 +15743,13 @@ class HamobileBanhang {
         if (this._vsgInventoryDesktop) {
             try {
                 this._vsgInventoryDesktop.destroy();
-            } catch (_) {}
+            } catch (_) { }
             this._vsgInventoryDesktop = null;
         }
         if (this._vsgInventoryMobile) {
             try {
                 this._vsgInventoryMobile.destroy();
-            } catch (_) {}
+            } catch (_) { }
             this._vsgInventoryMobile = null;
         }
         const mobile = document.getElementById('inventory-mobile-list');
@@ -15422,10 +15822,10 @@ class HamobileBanhang {
     }
 
     showStockUpdateForm() {
-        const productOptions = this.demoData.products.map(p => 
+        const productOptions = this.demoData.products.map(p =>
             `<option value="${p.id}">${p.name} - Tồn kho: ${p.stock}</option>`
         ).join('');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -15454,15 +15854,15 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     updateStock(event) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const productId = formData.get('product');
         const quantity = parseInt(formData.get('quantity'));
-        
+
         const product = this.demoData.products.find(p => p.id === productId);
         if (product) {
             product.stock += quantity;
@@ -15470,14 +15870,14 @@ class HamobileBanhang {
             this.showNotification(`Đã nhập ${quantity} ${product.name} vào kho. Tồn kho mới: ${product.stock}`, 'success');
             this.loadPage('inventory');
         }
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     showStockExportForm() {
-        const productOptions = this.demoData.products.filter(p => p.stock > 0).map(p => 
+        const productOptions = this.demoData.products.filter(p => p.stock > 0).map(p =>
             `<option value="${p.id}">${p.name} - Tồn kho: ${p.stock}</option>`
         ).join('');
-        
+
         const formHTML = `
             <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; display: flex; justify-content: center; align-items: center;" onclick="if(event.target===this && window._modalMousedownTarget===this) closeModal(this)">
                 <div style="background: white; padding: 32px; border-radius: 12px; width: 500px; max-width: 90vw;" onclick="event.stopPropagation()">
@@ -15517,16 +15917,16 @@ class HamobileBanhang {
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
     }
-    
+
     exportStock(event) {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const productId = formData.get('product');
         const quantity = parseInt(formData.get('quantity'));
         const reason = formData.get('reason');
-        
+
         const product = this.demoData.products.find(p => p.id === productId);
         if (product && product.stock >= quantity) {
             product.stock -= quantity;
@@ -15536,13 +15936,13 @@ class HamobileBanhang {
         } else if (product) {
             this.showNotification(`Không đủ hàng trong kho. Tồn kho hiện tại: ${product.stock}`, 'error');
         }
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
-    
+
     exportInventoryReport(mode = null) {
         this.showInventoryExportWithFilter();
     }
-    
+
     exportSalesReport(mode = null) {
         this.showSalesExportWithFilter();
     }
@@ -15550,7 +15950,7 @@ class HamobileBanhang {
     exportRepairsReport(mode = null) {
         this.showRepairsExportWithFilter();
     }
-    
+
     exportPurchaseReport(mode = null) {
         if (!mode) {
             this.showExportOptions('Xuất báo cáo chi phí mua hàng', 'purchases', 'exportPurchaseReport');
@@ -15575,12 +15975,12 @@ class HamobileBanhang {
             ];
             this.showDataViewer('Báo cáo chi phí mua hàng', purchaseData, columns);
         } else if (mode === 'download') {
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 "Mã PH,Nhà cung cấp,Ngày,Sản phẩm,Tổng tiền,Trạng thái\n" +
-                purchaseData.map(p => 
+                purchaseData.map(p =>
                     `${p.id},"${p.supplier}","${p.date}","${p.products}",${p.total},"${p.status}"`
                 ).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -15588,7 +15988,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification('Đã tải xuống báo cáo chi phí mua hàng', 'success');
         }
     }
@@ -15610,12 +16010,12 @@ class HamobileBanhang {
             ];
             this.showDataViewer('Danh sách nhà cung cấp', this.demoData.suppliers, columns);
         } else if (mode === 'download') {
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 "Mã NCC,Tên nhà cung cấp,Điện thoại,Email,Địa chỉ,Sản phẩm cung cấp\n" +
-                this.demoData.suppliers.map(s => 
+                this.demoData.suppliers.map(s =>
                     `${s.id},"${s.name}","${s.phone || ''}","${s.email || ''}","${s.address || ''}","${s.products || ''}"`
                 ).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -15623,7 +16023,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification('Đã tải xuống danh sách nhà cung cấp', 'success');
         }
     }
@@ -15646,12 +16046,12 @@ class HamobileBanhang {
             ];
             this.showDataViewer('Danh sách sản phẩm', this.demoData.products, columns);
         } else if (mode === 'download') {
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 "Mã SP,Tên sản phẩm,Danh mục,Giá bán,Giá vốn,Tồn kho,Nhà cung cấp\n" +
-                this.demoData.products.map(p => 
+                this.demoData.products.map(p =>
                     `${p.id},"${p.name}","${p.category}",${p.price},${p.importPrice || 0},${p.stock},"${p.supplier || ''}"`
                 ).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -15659,7 +16059,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification('Đã tải xuống danh sách sản phẩm', 'success');
         }
     }
@@ -15674,31 +16074,35 @@ class HamobileBanhang {
             const columns = [
                 { header: 'Mã danh mục', getValue: category => category.id },
                 { header: 'Tên danh mục', getValue: category => category.name },
-                { header: 'Danh mục cha', getValue: category => {
-                    if (!category.parent) return 'Danh mục gốc';
-                    const parent = this.demoData.categories.find(c => c.id === category.parent);
-                    return parent ? parent.name : 'N/A';
-                }},
-                { header: 'Số sản phẩm', getValue: category => {
-                    const fullCategoryName = category.parent ? 
-                        this.demoData.categories.find(c => c.id === category.parent)?.name + ' > ' + category.name :
-                        category.name;
-                    return this.demoData.products.filter(p => p.category === fullCategoryName || p.category === category.name).length;
-                }}
+                {
+                    header: 'Danh mục cha', getValue: category => {
+                        if (!category.parent) return 'Danh mục gốc';
+                        const parent = this.demoData.categories.find(c => c.id === category.parent);
+                        return parent ? parent.name : 'N/A';
+                    }
+                },
+                {
+                    header: 'Số sản phẩm', getValue: category => {
+                        const fullCategoryName = category.parent ?
+                            this.demoData.categories.find(c => c.id === category.parent)?.name + ' > ' + category.name :
+                            category.name;
+                        return this.demoData.products.filter(p => p.category === fullCategoryName || p.category === category.name).length;
+                    }
+                }
             ];
             this.showDataViewer('Danh sách danh mục', this.demoData.categories, columns);
         } else if (mode === 'download') {
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 "Mã danh mục,Tên danh mục,Danh mục cha,Số sản phẩm\n" +
                 this.demoData.categories.map(c => {
                     const parentName = c.parent ? (this.demoData.categories.find(p => p.id === c.parent)?.name || 'N/A') : 'Danh mục gốc';
-                    const fullCategoryName = c.parent ? 
+                    const fullCategoryName = c.parent ?
                         this.demoData.categories.find(p => p.id === c.parent)?.name + ' > ' + c.name :
                         c.name;
                     const productCount = this.demoData.products.filter(p => p.category === fullCategoryName || p.category === c.name).length;
                     return `${c.id},"${c.name}","${parentName}",${productCount}`;
                 }).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -15706,11 +16110,11 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification('Đã tải xuống dữ liệu danh mục', 'success');
         }
     }
-    
+
     showPromotionForm() {
         this.showNotification('Chức năng quản lý khuyến mãi - Coming soon!', 'info');
     }
@@ -15736,7 +16140,7 @@ class HamobileBanhang {
                 c.id, c.name, c.phone, c.email, c.address, c.companyName, c.department
             ].filter(Boolean).join(' ').toLowerCase();
             return `<div class="dropdown-option pos-customer-full-row" data-value="${escapeHtml((c.id + '')).toString()}" data-search="${escapeHtml(customerSearch)}" 
-                         onclick="app.selectCustomer(this, '${(c.id + '').replace(/'/g,"\\'")}', '${(c.name || '').replace(/'/g,"\\'")}')" 
+                         onclick="app.selectCustomer(this, '${(c.id + '').replace(/'/g, "\\'")}', '${(c.name || '').replace(/'/g, "\\'")}')" 
                          onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" style="border-bottom: 1px solid #f3f4f6; cursor: pointer; padding: 10px 12px;">
                         <div class="pos-customer-full-avatar">👤</div>
                         <div class="pos-customer-full-info">
@@ -15745,9 +16149,9 @@ class HamobileBanhang {
                         </div>
                     </div>`;
         }).join('');
-        
+
         // Create product dropdown options
-        const productDropdownOptions = this.demoData.products.map(p => 
+        const productDropdownOptions = this.demoData.products.map(p =>
             `<div class="dropdown-option" data-value="${p.id}" data-price="${p.price}" data-stock="${p.stock}" 
                   onclick="app.selectProduct(this, '${p.id}', '${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ', ${p.price})" 
                   style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" 
@@ -15886,14 +16290,14 @@ class HamobileBanhang {
             </div>
         `;
         document.body.insertAdjacentHTML('beforeend', formHTML);
-        
+
         // Add click outside listener to close dropdowns
         document.addEventListener('click', (event) => {
             if (!event.target.closest('.custom-dropdown')) {
                 this.closeAllDropdowns();
             }
         });
-        
+
         if (prefillProductId) {
             this.prefillProductInOrderForm(prefillProductId);
         }
@@ -15921,7 +16325,7 @@ class HamobileBanhang {
 
     addProductRow() {
         // Create product dropdown options
-        const productDropdownOptions = this.demoData.products.map(p => 
+        const productDropdownOptions = this.demoData.products.map(p =>
             `<div class="dropdown-option" data-value="${p.id}" data-price="${p.price}" data-stock="${p.stock}" 
                   onclick="app.selectProduct(this, '${p.id}', '${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ', ${p.price})" 
                   style="padding: 10px; cursor: pointer; border-bottom: 1px solid #f3f4f6;" 
@@ -15929,7 +16333,7 @@ class HamobileBanhang {
                 ${p.name} - ${p.price.toLocaleString('vi-VN')} VNĐ (Còn: ${p.stock})
             </div>`
         ).join('');
-        
+
         const newRow = `
             <div class="product-row" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
                 <div class="custom-dropdown" style="flex: 2; position: relative;">
@@ -16054,15 +16458,15 @@ class HamobileBanhang {
         const dropdown = element.closest('.custom-dropdown');
         const dropdownList = dropdown.querySelector('.dropdown-list');
         const arrow = dropdown.querySelector('.dropdown-arrow');
-        
+
         // Close other dropdowns
         this.closeAllDropdowns();
-        
+
         // Toggle current dropdown
         if (dropdownList.style.display === 'none' || !dropdownList.style.display) {
             dropdownList.style.display = 'block';
             arrow.style.transform = 'rotate(180deg)';
-            
+
             // Focus search input
             const searchInput = dropdown.querySelector('.dropdown-search');
             setTimeout(() => searchInput.focus(), 100);
@@ -16071,20 +16475,20 @@ class HamobileBanhang {
             arrow.style.transform = 'rotate(0deg)';
         }
     }
-    
+
     toggleProductDropdown(element) {
         const dropdown = element.closest('.custom-dropdown');
         const dropdownList = dropdown.querySelector('.dropdown-list');
         const arrow = dropdown.querySelector('.dropdown-arrow');
-        
+
         // Close other dropdowns
         this.closeAllDropdowns();
-        
+
         // Toggle current dropdown
         if (dropdownList.style.display === 'none' || !dropdownList.style.display) {
             dropdownList.style.display = 'block';
             arrow.style.transform = 'rotate(180deg)';
-            
+
             // Focus search input
             const searchInput = dropdown.querySelector('.dropdown-search');
             setTimeout(() => searchInput.focus(), 100);
@@ -16093,49 +16497,49 @@ class HamobileBanhang {
             arrow.style.transform = 'rotate(0deg)';
         }
     }
-    
+
     closeAllDropdowns() {
         const allDropdowns = document.querySelectorAll('.dropdown-list');
         const allArrows = document.querySelectorAll('.dropdown-arrow');
-        
+
         allDropdowns.forEach(dropdown => {
             dropdown.style.display = 'none';
         });
-        
+
         allArrows.forEach(arrow => {
             arrow.style.transform = 'rotate(0deg)';
         });
     }
-    
+
     selectCustomer(element, customerId, customerName) {
         const dropdown = element.closest('.custom-dropdown');
         const selectedText = dropdown.querySelector('.selected-text');
         const hiddenInput = dropdown.querySelector('input[type="hidden"]');
-        
+
         selectedText.textContent = customerName;
         const posEditHeader = typeof dropdown.closest === 'function' && dropdown.closest('.orders-mobile-edit-root--pos .edit-order-pos-mobile-head');
         selectedText.style.color = posEditHeader ? '#ffffff' : '#374151';
         hiddenInput.value = customerId;
-        
+
         this.closeAllDropdowns();
     }
-    
+
     selectProduct(element, productId, productName, price) {
         const dropdown = element.closest('.custom-dropdown');
         const selectedText = dropdown.querySelector('.selected-text');
         const hiddenInput = dropdown.querySelector('input[type="hidden"]');
-        
+
         selectedText.textContent = productName;
         selectedText.style.color = '#374151';
         hiddenInput.value = productId;
-        
+
         // Update price in the row - check both possible field names
         const productRow = dropdown.closest('.product-item, .product-row');
         let priceInput = productRow.querySelector('input[name="prices[]"]');
         if (!priceInput) {
             priceInput = productRow.querySelector('input[name="price[]"]');
         }
-        
+
         if (priceInput) {
             priceInput.value = this.formatPrice(price);
             // Call the appropriate calculation function
@@ -16149,9 +16553,9 @@ class HamobileBanhang {
                 this.calculateOrderTotal();
             }
         }
-        
+
         this.closeAllDropdowns();
-        
+
         // ✨ TỰ ĐỘNG THÊM DÒNG SẢN PHẨM MỚI
         // Check if this is the form "Tạo đơn hàng mới" (có product-list container)
         const productList = document.getElementById('product-list');
@@ -16160,7 +16564,7 @@ class HamobileBanhang {
             const allRows = productList.querySelectorAll('.product-row');
             const currentRowIndex = Array.from(allRows).indexOf(productRow);
             const isLastRow = currentRowIndex === allRows.length - 1;
-            
+
             // If this is the last row and a product is selected, add a new empty row
             if (isLastRow) {
                 console.log('🚀 Auto-adding new product row after selection');
@@ -16168,13 +16572,13 @@ class HamobileBanhang {
             }
         }
     }
-    
+
     filterDropdownItems(searchInput, type) {
         const searchTerm = (searchInput.value || '').trim().toLowerCase();
         const dropdown = searchInput.closest('.custom-dropdown');
         if (!dropdown) return;
         const options = dropdown.querySelectorAll('.dropdown-option');
-        
+
         options.forEach(option => {
             const text = String(option.getAttribute('data-search') || option.textContent || '').toLowerCase();
             if (text.includes(searchTerm)) {
@@ -16189,7 +16593,7 @@ class HamobileBanhang {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const customerId = formData.get('customer') || 'KH_LE';
         let customer = (this.demoData.customers || []).find(c => c.id === customerId);
         if (!customer || customerId === 'KH_LE') {
@@ -16202,10 +16606,10 @@ class HamobileBanhang {
         const prices = formData.getAll('price[]');
         const discountTypes = formData.getAll('discountType[]');
         const discounts = formData.getAll('discount[]');
-        
+
         const stockWarnings = [];
         const outOfStockItems = [];
-        
+
         for (let i = 0; i < productIds.length; i++) {
             if (productIds[i] && productIds[i].trim() !== '' && quantities[i] && prices[i]) {
                 const product = this.demoData.products.find(p => p.id === productIds[i]);
@@ -16229,7 +16633,7 @@ class HamobileBanhang {
                 }
             }
         }
-        
+
         // Thông báo lỗi nếu có sản phẩm hết hàng
         if (outOfStockItems.length > 0) {
             this.showNotification(`Không đủ hàng: ${outOfStockItems.join(', ')}`, 'error');
@@ -16249,7 +16653,7 @@ class HamobileBanhang {
         }, 0);
         // Sử dụng ngày giờ Việt Nam (UTC+7) cho đơn hàng mới  
         const vietnamTime = this.getVietnamTime();
-        
+
         // Get payment status to determine order status
         const paymentStatus = formData.get('paymentStatus') || 'Đã thanh toán';
         let amountPaid = this.parsePrice(formData.get('amountPaid'));
@@ -16295,7 +16699,7 @@ class HamobileBanhang {
         // THÊM ĐƠN HÀNG MỚI VÀO ĐẦU DANH SÁCH thay vì cuối
         this.demoData.orders.unshift(newOrder);
         console.log('✅ Đơn hàng mới được thêm vào ĐẦU danh sách:', newOrder.id);
-        
+
         // Công nợ = phần chưa trả (tổng − khách thanh toán) - bỏ qua Khách lẻ (không lưu trong danh sách)
         if (orderDebt > 0 && customerId !== 'KH_LE') {
             const cust = (this.demoData.customers || []).find(c => c.id === customerId);
@@ -16304,36 +16708,36 @@ class HamobileBanhang {
                 console.log(`Cập nhật công nợ khách hàng ${cust.name}: +${orderDebt.toLocaleString('vi-VN')} VNĐ (đã trả ${amountPaid.toLocaleString('vi-VN')} / ${total.toLocaleString('vi-VN')})`);
             }
         }
-        
+
         this.saveToLocalStorage();
-        
+
         // Ghi log hoạt động
-        this.addActivityLog('success', '📋', `Tạo đơn hàng ${newOrder.id}`, 
+        this.addActivityLog('success', '📋', `Tạo đơn hàng ${newOrder.id}`,
             `Khách hàng: ${customer.name} - Giá trị: ${total.toLocaleString('vi-VN')} VNĐ - ${products.length} sản phẩm - ${paymentStatus}`, 'order');
-        
+
         // Ghi log hoạt động trừ tồn kho
         products.forEach(ordProduct => {
-            this.addActivityLog('info', '📦', `Trừ tồn kho`, 
+            this.addActivityLog('info', '📦', `Trừ tồn kho`,
                 `Sản phẩm: ${ordProduct.name} - Số lượng: ${ordProduct.quantity || 1}`, 'inventory');
         });
-        
+
         // Hiển thị thông báo thành công
         let successMessage = `Đã tạo đơn hàng ${newOrder.id}`;
-        
+
         // Hiển thị cảnh báo tồn kho thấp nếu có
         if (lowStockAlerts.length > 0) {
-            const alertMessages = lowStockAlerts.map(alert => 
+            const alertMessages = lowStockAlerts.map(alert =>
                 `${alert.name}: còn ${alert.current}/${alert.minimum}`
             ).join(', ');
-            
+
             setTimeout(() => {
                 this.showNotification(`⚠️ Cảnh báo tồn kho thấp: ${alertMessages}`, 'warning');
             }, 1000);
         }
-        
+
         this.showNotification(successMessage, 'success');
         this.loadPage('orders');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
 
     getOrdersMobileStatusBadgeClass(status) {
@@ -16708,7 +17112,7 @@ class HamobileBanhang {
                 c.id, c.name, c.phone, c.email, c.address, c.companyName, c.department
             ].filter(Boolean).join(' ').toLowerCase();
             return `<div class="dropdown-option pos-customer-full-row" data-value="${escapeHtml((c.id + '')).toString()}" data-search="${escapeHtml(customerSearch)}" 
-                         onclick="app.selectCustomer(this, '${(c.id + '').replace(/'/g,"\\'")}', '${(c.name || '').replace(/'/g,"\\'")}')" 
+                         onclick="app.selectCustomer(this, '${(c.id + '').replace(/'/g, "\\'")}', '${(c.name || '').replace(/'/g, "\\'")}')" 
                          onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='white'" style="border-bottom: 1px solid #f3f4f6; cursor: pointer; padding: 10px 12px;">
                         <div class="pos-customer-full-avatar">👤</div>
                         <div class="pos-customer-full-info">
@@ -16720,7 +17124,7 @@ class HamobileBanhang {
         const selectedCustomerId = order.customerId || 'KH_LE';
         const selectedCustomer = (this.demoData.customers || []).find(c => c.id === selectedCustomerId);
         const selectedCustomerText = selectedCustomer ? (selectedCustomer.name || 'Khách lẻ') : 'Khách lẻ';
-        
+
         const productRows = !isMobileEdit ? (order.products || []).map((p, i) => {
             const dt = (p.discountType || 'vnd') === 'percent' ? 'percent' : 'vnd';
             const thumbHtml = this.getEditOrderLineThumbHtml(p.id);
@@ -16732,14 +17136,14 @@ class HamobileBanhang {
                         <div class="edit-order-pos-name">
                             <select class="edit-order-inp edit-order-product-name" name="productId_${i}" onchange="app.updateProductPriceInEdit(this, ${i}); app.editOrderRefreshLineThumb(this)">
                             ${this.demoData.products.map(prod =>
-                                `<option value="${prod.id}" data-price="${prod.price || 0}" ${prod.id === p.id ? 'selected' : ''}>${prod.name}</option>`
-                            ).join('')}
+                `<option value="${prod.id}" data-price="${prod.price || 0}" ${prod.id === p.id ? 'selected' : ''}>${prod.name}</option>`
+            ).join('')}
                             </select>
                         </div>
                         <div class="edit-order-pos-meta">
                             <div class="edit-order-pos-price">
                                 <span class="edit-order-pos-label">Giá bán</span>
-                                <input type="text" class="edit-order-inp price-input edit-order-product-price" name="price_${i}" value="${(p.price||0).toLocaleString('vi-VN')}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" placeholder="Giá" inputmode="numeric">
+                                <input type="text" class="edit-order-inp price-input edit-order-product-price" name="price_${i}" value="${(p.price || 0).toLocaleString('vi-VN')}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" placeholder="Giá" inputmode="numeric">
                             </div>
                             <div class="edit-order-pos-qty">
                                 <span class="edit-order-pos-label">Số lượng</span>
@@ -16766,7 +17170,7 @@ class HamobileBanhang {
             </div>
         `;
         }).join('') : '';
-        
+
         const mobileEditTotalInit = this.computeEditOrderProductsTotalFromLines(order.products || []);
         const mobileCountInit = (order.products || []).reduce((n, p) => n + (p.quantity || 1), 0);
         const productRowsMobile = isMobileEdit
@@ -16774,7 +17178,7 @@ class HamobileBanhang {
                 ? (order.products || []).map((p, i) => this.buildEditOrderMobileProductRow(p, i)).join('')
                 : '<div class="pos-cart-empty">Chưa có sản phẩm. Nhấn + Thêm sản phẩm.</div>')
             : '';
-        
+
         const editOrderFormInner = !isMobileEdit ? `
                     <form class="edit-order-form" onsubmit="app.updateOrderComplete(event, ${index})">
                         <div class="edit-order-section edit-order-section--customer">
@@ -16933,7 +17337,7 @@ class HamobileBanhang {
             </div>`;
             document.body.insertAdjacentHTML('beforeend', mobileEditHtml);
             document.body.style.overflow = 'hidden';
-            try { this.syncEditOrderMobileTotals(); } catch (_) {}
+            try { this.syncEditOrderMobileTotals(); } catch (_) { }
             if (typeof history !== 'undefined' && history.pushState) {
                 history.pushState({ __nbOrdersEdit: 1 }, '', '');
             }
@@ -16970,14 +17374,14 @@ class HamobileBanhang {
                         <div class="edit-order-pos-name">
                             <select class="edit-order-inp edit-order-product-name" name="productId_${rowCount}" onchange="app.updateProductPriceInEdit(this, ${rowCount}); app.editOrderRefreshLineThumb(this)">
                             ${this.demoData.products.map(prod =>
-                                `<option value="${prod.id}" data-price="${prod.price || 0}">${prod.name}</option>`
-                            ).join('')}
+            `<option value="${prod.id}" data-price="${prod.price || 0}">${prod.name}</option>`
+        ).join('')}
                             </select>
                         </div>
                         <div class="edit-order-pos-meta">
                             <div class="edit-order-pos-price">
                                 <span class="edit-order-pos-label">Giá bán</span>
-                                <input type="text" class="edit-order-inp price-input edit-order-product-price" name="price_${rowCount}" value="${firstProduct ? (firstProduct.price||0).toLocaleString('vi-VN') : '0'}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" placeholder="Giá" inputmode="numeric">
+                                <input type="text" class="edit-order-inp price-input edit-order-product-price" name="price_${rowCount}" value="${firstProduct ? (firstProduct.price || 0).toLocaleString('vi-VN') : '0'}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this)" onblur="app.priceInputBlur(this)" placeholder="Giá" inputmode="numeric">
                             </div>
                             <div class="edit-order-pos-qty">
                                 <span class="edit-order-pos-label">Số lượng</span>
@@ -17053,7 +17457,7 @@ class HamobileBanhang {
         try {
             inp.dispatchEvent(new Event('input', { bubbles: true }));
             inp.dispatchEvent(new Event('change', { bubbles: true }));
-        } catch (_) {}
+        } catch (_) { }
         this.syncEditOrderMobileTotals();
     }
 
@@ -17092,7 +17496,7 @@ class HamobileBanhang {
                 </div>
                 <div class="edit-order-line-card__checkout-row">
                     <div class="edit-order-line-card__price-wrap">
-                        <input type="text" class="edit-order-line-card__price edit-order-inp price-input edit-order-product-price" name="price_${i}" value="${(p.price||0).toLocaleString('vi-VN')}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this); app.syncEditOrderMobileTotals()" onblur="app.priceInputBlur(this); app.syncEditOrderMobileTotals()" placeholder="Giá" inputmode="numeric" aria-label="Đơn giá">
+                        <input type="text" class="edit-order-line-card__price edit-order-inp price-input edit-order-product-price" name="price_${i}" value="${(p.price || 0).toLocaleString('vi-VN')}" onfocus="app.priceInputFocus(this)" oninput="app.priceInputInput(this); app.syncEditOrderMobileTotals()" onblur="app.priceInputBlur(this); app.syncEditOrderMobileTotals()" placeholder="Giá" inputmode="numeric" aria-label="Đơn giá">
                     </div>
                     <div class="edit-order-line-card__qty-wrap">
                         <div class="edit-order-line-card__stepper">
@@ -17173,7 +17577,7 @@ class HamobileBanhang {
         const btn = document.querySelector('#orders-mobile-edit-root .edit-order-add-product-btn');
         if (btn) {
             btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            setTimeout(() => { try { btn.focus(); } catch (_) {} }, 150);
+            setTimeout(() => { try { btn.focus(); } catch (_) { } }, 150);
         }
     }
 
@@ -17203,7 +17607,7 @@ class HamobileBanhang {
         resultsEl.innerHTML = products.map(p => {
             const stock = (p.hasImei && p.imeis) ? (p.stock != null ? p.stock : p.imeis.length) : (p.stock || 0);
             const canSell = stock > 0;
-            return `<div class="pos-step2-search-item" onclick="${canSell ? `app.addProductToEditOrderFromStep2Search('${p.id}')` : ''}" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #f3f4f6; cursor: ${canSell ? 'pointer' : 'not-allowed'}; background: ${canSell ? 'white' : '#f9fafb'};" onmouseover="if(${canSell}) this.style.background='#ecfdf5'" onmouseout="this.style.background='${canSell ? 'white' : '#f9fafb'}'"><div style="flex: 1; min-width: 0;"><div style="font-weight: 600; font-size: 13px; line-height: 1.4;">${(p.name||'').replace(/</g,'&lt;')}</div><div style="font-size: 11px; color: #6b7280; line-height: 1.4; margin-top: 2px;">${(p.id||'').replace(/</g,'&lt;')} • ${stock} tồn</div>${this.buildPosImeiLineForProductList(p)}</div><div style="font-weight: 600; color: #059669; flex-shrink: 0;">${(p.price||0).toLocaleString('vi-VN')}</div></div>`;
+            return `<div class="pos-step2-search-item" onclick="${canSell ? `app.addProductToEditOrderFromStep2Search('${p.id}')` : ''}" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #f3f4f6; cursor: ${canSell ? 'pointer' : 'not-allowed'}; background: ${canSell ? 'white' : '#f9fafb'};" onmouseover="if(${canSell}) this.style.background='#ecfdf5'" onmouseout="this.style.background='${canSell ? 'white' : '#f9fafb'}'"><div style="flex: 1; min-width: 0;"><div style="font-weight: 600; font-size: 13px; line-height: 1.4;">${(p.name || '').replace(/</g, '&lt;')}</div><div style="font-size: 11px; color: #6b7280; line-height: 1.4; margin-top: 2px;">${(p.id || '').replace(/</g, '&lt;')} • ${stock} tồn</div>${this.buildPosImeiLineForProductList(p)}</div><div style="font-weight: 600; color: #059669; flex-shrink: 0;">${(p.price || 0).toLocaleString('vi-VN')}</div></div>`;
         }).join('');
     }
 
@@ -17237,7 +17641,7 @@ class HamobileBanhang {
                     qtyInp.value = String(v);
                     try {
                         qtyInp.dispatchEvent(new Event('change', { bubbles: true }));
-                    } catch (_) {}
+                    } catch (_) { }
                     this.syncEditOrderMobileTotals();
                 }
                 return;
@@ -17256,16 +17660,16 @@ class HamobileBanhang {
         event.preventDefault();
         const form = event.target;
         const formData = new FormData(form);
-        
+
         const order = this.demoData.orders[index];
         const oldCustomer = this.demoData.customers.find(c => c.id === order.customerId);
         const newCustomer = this.demoData.customers.find(c => c.id === formData.get('customerId'));
-        
+
         if (!oldCustomer || !newCustomer) {
             this.showNotification('Không tìm thấy thông tin khách hàng', 'error');
             return;
         }
-        
+
         const oldOrderDebt = Math.max(0, (order.total || 0) - (order.amountPaid != null ? order.amountPaid : (order.paymentStatus === 'Đã thanh toán' ? order.total : 0)));
         const productsData = this.demoData.products || [];
         const oldByPid = {};
@@ -17278,11 +17682,11 @@ class HamobileBanhang {
                 oldByPid[pid].soldImeis = (oldByPid[pid].soldImeis || []).concat(op.soldImeis);
             }
         });
-        
+
         // Lấy thông tin sản phẩm mới
         const products = [];
         const productElements = form.querySelectorAll('[data-product-row]');
-        
+
         productElements.forEach((row, i) => {
             const productId = formData.get(`productId_${i}`);
             const price = this.parsePrice(formData.get(`price_${i}`));
@@ -17313,7 +17717,7 @@ class HamobileBanhang {
             const discountAmount = isVnd ? Math.min(product.discount || 0, beforeDiscount) : (beforeDiscount * (product.discount || 0) / 100);
             return sum + Math.max(0, beforeDiscount - discountAmount);
         }, 0);
-        
+
         // Cập nhật đơn hàng
         const newPaymentStatus = formData.get('paymentStatus');
         const newStatus = formData.get('status');
@@ -17334,13 +17738,13 @@ class HamobileBanhang {
             this.cleanupEditOrderFormUI(form);
             return;
         }
-        
+
         let newAmountPaid = this.parsePrice(formData.get('amountPaid'));
         if (isNaN(newAmountPaid) || newAmountPaid < 0) newAmountPaid = 0;
         if (newAmountPaid > newTotal) newAmountPaid = newTotal;
         if (newPaymentStatus === 'Đã thanh toán' && newAmountPaid === 0) newAmountPaid = newTotal;
         const newOrderDebt = newTotal - newAmountPaid;
-        
+
         const newByPid = {};
         products.forEach(p => {
             const pid = p.id || p.productId;
@@ -17360,7 +17764,7 @@ class HamobileBanhang {
                 return;
             }
         }
-        
+
         (order.products || []).forEach(op => {
             const prod = productsData.find(p => p.id === (op.id || op.productId));
             if (!prod || !(op.quantity > 0)) return;
@@ -17378,7 +17782,7 @@ class HamobileBanhang {
             prod.stock = Math.max(0, (prod.stock || (prod.hasImei && prod.imeis ? prod.imeis.length : 0)) - qty);
             pr.productId = pr.id || pr.productId;
         }
-        
+
         oldCustomer.debt -= oldOrderDebt;
         if (oldCustomer.debt < 0) oldCustomer.debt = 0;
         order.customerId = newCustomer.id;
@@ -17394,7 +17798,7 @@ class HamobileBanhang {
         if (newOrderDebt > 0) {
             newCustomer.debt += newOrderDebt;
         }
-        
+
         this.saveToLocalStorage();
         this.showNotification(`Đã cập nhật đơn hàng ${order.id}`, 'success');
         this.loadPage('orders');
@@ -17421,11 +17825,11 @@ class HamobileBanhang {
             order.status = newStatus;
         }
         order.paymentMethod = formData.get('paymentMethod');
-        
+
         this.saveToLocalStorage();
         this.showNotification(`Đã cập nhật đơn hàng ${order.id}`, 'success');
         this.loadPage('orders');
-        const modal = form.closest("div[style*=\"fixed\"]"); if(modal) modal.remove();
+        const modal = form.closest("div[style*=\"fixed\"]"); if (modal) modal.remove();
     }
 
     async deleteOrder(index, redirectTo) {
@@ -17476,7 +17880,7 @@ class HamobileBanhang {
 
         // Xác định trạng thái sẽ chuyển sang
         let newStatus, newPaymentStatus, statusDescription;
-        
+
         if (order.paymentStatus === 'Đã thanh toán') {
             newPaymentStatus = 'Công nợ';
             newStatus = this.isOrderFinalizedForRevenue(order) ? 'Đang xử lý' : order.status;
@@ -17523,7 +17927,7 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', confirmHTML);
     }
 
@@ -17545,15 +17949,15 @@ class HamobileBanhang {
         window.FirebaseStorage.setData(this.demoData);
         this.syncCustomerDebt(true);
         this.refreshAllCustomerDisplays();
-        
+
         // Ghi log hoạt động
         const statusChange = `${oldPaymentStatus} → ${newPaymentStatus}`;
-        this.addActivityLog('success', '💳', `Cập nhật thanh toán ${order.id}`, 
+        this.addActivityLog('success', '💳', `Cập nhật thanh toán ${order.id}`,
             `Khách hàng: ${customer.name} - Thay đổi: ${statusChange} - Giá trị: ${order.total.toLocaleString('vi-VN')} VNĐ`, 'payment');
-        
+
         const debtAmt = this.getActualDebtForCustomer(customer);
         this.showNotification(`✅ Đã cập nhật: ${order.id} - ${newPaymentStatus}. Nợ ${customer.name || customer.id}: ${debtAmt.toLocaleString('vi-VN')} VNĐ`, 'success');
-        
+
         // Cập nhật giao diện ngay lập tức thay vì tải lại trang
         this.updateOrderRowDisplay(index);
     }
@@ -17561,36 +17965,36 @@ class HamobileBanhang {
     updateOrderRowDisplay(orderIndex) {
         const order = this.demoData.orders[orderIndex];
         if (!order) return;
-        
+
         // Tìm dòng đơn hàng trong bảng hiện tại
         const orderRows = document.querySelectorAll('#orders-table tbody tr[data-order-index]');
         let targetRow = null;
-        
+
         orderRows.forEach(row => {
             if (parseInt(row.getAttribute('data-order-index')) === orderIndex) {
                 targetRow = row;
             }
         });
-        
+
         if (!targetRow) {
             this.loadPage('orders');
             return;
         }
-        
+
         // Cập nhật cell trạng thái đơn hàng
         const statusCell = targetRow.querySelector('.status-cell');
         if (statusCell) {
-            const statusColor = order.status === 'Hoàn thành' ? '#16a34a' : 
-                              order.status === 'Hủy' ? '#dc2626' : '#f59e0b';
+            const statusColor = order.status === 'Hoàn thành' ? '#16a34a' :
+                order.status === 'Hủy' ? '#dc2626' : '#f59e0b';
             statusCell.innerHTML = `<span style="background: ${statusColor}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600;">${escapeHtml(String(order.status || ''))}</span>`;
         }
-        
+
         // Cập nhật cell trạng thái thanh toán với nút đúp click
         const paymentCell = targetRow.querySelector('.payment-cell');
         if (paymentCell) {
             const buttonColor = order.paymentStatus === 'Đã thanh toán' ? '#22c55e' : '#f59e0b';
             const buttonText = order.paymentStatus === 'Đã thanh toán' ? '✓ Đã TT' : 'Công nợ';
-            
+
             paymentCell.innerHTML = `
                 <button ondblclick="app.togglePaymentStatus(${orderIndex})" style="
                     background: ${buttonColor}; 
@@ -17607,11 +18011,11 @@ class HamobileBanhang {
         const filteredOrders = (this.demoData.orders || []).filter(order =>
             order && this.orderMatchesPeriod(order, period || 'all')
         );
-        
+
         // Ẩn tất cả các dòng trong bảng
         const rows = document.querySelectorAll('#orders-table tbody tr');
         rows.forEach(row => row.style.display = 'none');
-        
+
         // Hiển thị chỉ những đơn hàng được lọc
         filteredOrders.forEach((order, index) => {
             const originalIndex = this.demoData.orders.findIndex(o => o.id === order.id);
@@ -17620,14 +18024,14 @@ class HamobileBanhang {
                 row.style.display = '';
             }
         });
-        
+
         // Cập nhật tiêu đề và thông báo
         const periodText = this.getOrdersPeriodPhrase(period);
         const headerElement = document.querySelector('#orders-table').previousElementSibling;
         if (headerElement && headerElement.tagName === 'H3') {
             headerElement.innerHTML = `<span>📋</span> Đơn hàng ${periodText} (${filteredOrders.length})`;
         }
-        
+
         this.showNotification(`Hiển thị ${filteredOrders.length} đơn hàng ${periodText}`, 'success');
     }
 
@@ -17721,14 +18125,14 @@ class HamobileBanhang {
             // Tạo dữ liệu chi tiết cho Excel
             let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
             csvContent += "Mã đơn,Khách hàng,Ngày,Giờ,Sản phẩm,Số lượng,Đơn giá,Thành tiền,Tổng đơn hàng,Trạng thái,Thanh toán\n";
-            
+
             this.demoData.orders.forEach(order => {
                 order.products.forEach((product, productIndex) => {
                     const row = `${productIndex === 0 ? order.id : ''},"${productIndex === 0 ? order.customerName : ''}","${productIndex === 0 ? order.date : ''}","${productIndex === 0 ? order.time : ''}","${product.name}",${product.quantity},${product.price},${product.quantity * product.price},"${productIndex === 0 ? order.total : ''}","${productIndex === 0 ? order.status : ''}","${productIndex === 0 ? order.paymentMethod : ''}"`;
                     csvContent += row + "\n";
                 });
             });
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -17736,20 +18140,20 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification('Đã tải xuống báo cáo đơn hàng chi tiết', 'success');
         }
     }
-    
+
     // Additional Report Functions
     exportTopProductsReport(mode = null) {
         this.showTopProductsExportWithFilter();
     }
-    
+
     exportFinancialReport(mode = null) {
         this.showFinancialExportWithFilter();
     }
-    
+
     showTrendAnalysis() {
         this.loadPage('dashboard');
         const scrollTo = () => {
@@ -17776,7 +18180,7 @@ class HamobileBanhang {
             const text = option.textContent.toLowerCase();
             const matches = text.includes(searchTerm.toLowerCase());
             option.style.display = matches ? '' : 'none';
-            
+
             if (matches) hasVisibleOptions = true;
         });
 
@@ -17786,7 +18190,7 @@ class HamobileBanhang {
             if (notFoundOption) {
                 notFoundOption.remove();
             }
-            
+
             const newOption = document.createElement('option');
             newOption.value = '';
             newOption.textContent = '❌ Không tìm thấy khách hàng';
@@ -17884,7 +18288,7 @@ class HamobileBanhang {
         const taxField = document.getElementById('tax-field');
         const companyInput = document.querySelector('input[name="companyName"]');
         const departmentInput = document.querySelector('input[name="department"]');
-        
+
         if (customerType === 'doanh-nghiep') {
             companyField.style.display = 'block';
             taxField.style.display = 'block';
@@ -17902,7 +18306,7 @@ class HamobileBanhang {
     quickAddCustomer(event) {
         event.preventDefault();
         const formData = new FormData(event.target);
-        
+
         const maxNum = Math.max(0, ...(this.demoData.customers || []).map(c => {
             const m = (c.id || '').match(/^KH(\d+)$/);
             return m ? parseInt(m[1], 10) : 0;
@@ -17948,7 +18352,7 @@ class HamobileBanhang {
         // Close the modal
         const modal = event.target.closest("div[style*=\"fixed\"]");
         if (modal) modal.remove();
-        
+
         // Clear search box (nếu có - trang Create Order)
         const searchInput = document.getElementById('customer-search');
         if (searchInput) {
@@ -17963,10 +18367,10 @@ class HamobileBanhang {
     showPrintOptionsPopup(index) {
         console.log('=== SHOWING PRINT OPTIONS ===');
         console.log('Index:', index);
-        
+
         try {
             const order = this.demoData.orders[index];
-            
+
             if (!order) {
                 this.showNotification('❌ Không tìm thấy đơn hàng!', 'error');
                 return;
@@ -18005,9 +18409,9 @@ class HamobileBanhang {
                     </div>
                 </div>
             `;
-            
+
             document.body.insertAdjacentHTML('beforeend', printOptionsHTML);
-            
+
         } catch (error) {
             console.error('Lỗi hiển thị popup:', error);
             this.showNotification('❌ Lỗi hiển thị popup: ' + error.message, 'error');
@@ -18021,7 +18425,7 @@ class HamobileBanhang {
                 <span class="info-label">Tên khách hàng:</span>
                 <span class="info-value">${customer.name}</span>
             </div>`;
-        
+
         if (customer.type === 'doanh-nghiep' && customer.companyName) {
             customerInfo += `
             <div class="info-row">
@@ -18029,7 +18433,7 @@ class HamobileBanhang {
                 <span class="info-value">${customer.companyName}</span>
             </div>`;
         }
-        
+
         if (customer.type === 'doanh-nghiep' && customer.department) {
             customerInfo += `
             <div class="info-row">
@@ -18037,13 +18441,13 @@ class HamobileBanhang {
                 <span class="info-value">${customer.department}</span>
             </div>`;
         }
-        
+
         customerInfo += `
             <div class="info-row">
                 <span class="info-label">Số điện thoại:</span>
                 <span class="info-value">${customer.phone}</span>
             </div>`;
-        
+
         if (customer.type === 'doanh-nghiep' && customer.taxCode) {
             customerInfo += `
             <div class="info-row">
@@ -18051,13 +18455,13 @@ class HamobileBanhang {
                 <span class="info-value">${customer.taxCode}</span>
             </div>`;
         }
-        
+
         customerInfo += `
             <div class="info-row">
                 <span class="info-label">Địa chỉ:</span>
                 <span class="info-value">${customer.address || 'Không có'}</span>
             </div>`;
-        
+
         if (includePaymentStatus && order) {
             customerInfo += `
             <div class="info-row">
@@ -18067,7 +18471,7 @@ class HamobileBanhang {
                 </span>
             </div>`;
         }
-        
+
         return customerInfo;
     }
 
@@ -18075,11 +18479,11 @@ class HamobileBanhang {
     testPrintInvoice(index) {
         console.log('=== PRINTING PROFESSIONAL INVOICE ===');
         console.log('Index:', index);
-        
+
         try {
             const order = this.demoData.orders[index];
             console.log('Order data:', order);
-            
+
             if (!order) {
                 this.showNotification('❌ Không tìm thấy đơn hàng!', 'error');
                 return;
@@ -18093,15 +18497,15 @@ class HamobileBanhang {
             }
 
             // Find customer info
-            const customer = this.demoData.customers.find(c => c.id === order.customerId) || { 
-                name: order.customerName, 
-                phone: order.customOrderPhone || 'Không có', 
-                address: order.customerAddress || 'Không có' 
+            const customer = this.demoData.customers.find(c => c.id === order.customerId) || {
+                name: order.customerName,
+                phone: order.customOrderPhone || 'Không có',
+                address: order.customerAddress || 'Không có'
             };
-            
+
             // HOSTING SOLUTION: Get company settings + global assets
             const companySettings = this.getCompanySettings();
-            
+
             // Override with global assets if available (for hosting)
             if (window.companyAssets && window.companyAssets.logo) {
                 companySettings.logo = window.companyAssets.logo;
@@ -18109,22 +18513,22 @@ class HamobileBanhang {
             if (window.companyAssets && window.companyAssets.qr) {
                 companySettings.qrCode = window.companyAssets.qr;
             }
-            
+
             console.log('✅ HOSTING READY - Logo/QR from global assets');
             console.log('Logo data:', companySettings.logo ? 'Found' : 'Not found');
             console.log('QR data:', companySettings.qrCode ? 'Found' : 'Not found');
-            
+
             // Professional invoice window
             const invoiceWindow = window.open('', '_blank', 'width=800,height=900');
-            
+
             if (!invoiceWindow) {
                 this.showNotification('❌ Popup bị chặn! Hãy cho phép popup.', 'error');
                 return;
             }
-            
+
             invoiceWindow.document.write(`
                 <!DOCTYPE html>
-                <html lang="vi">
+                <html dir="ltr" lang="vi">
                 <head>
                     <meta charset="UTF-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -18305,16 +18709,16 @@ class HamobileBanhang {
                             </thead>
                             <tbody>
                                 ${(order.products || []).map((item, index) => {
-                                    const beforeDiscount = (item.price || 0) * (item.quantity || 0);
-                                    const isVnd = (item.discountType || 'vnd') === 'vnd';
-                                    const discountVal = item.discount || 0;
-                                    const discountAmount = isVnd ? Math.min(discountVal, beforeDiscount) : (beforeDiscount * discountVal / 100);
-                                    const subtotal = Math.max(0, beforeDiscount - discountAmount);
-                                    const effectivePrice = (item.quantity || 1) > 0 ? Math.round(subtotal / (item.quantity || 1)) : 0;
-                                    const origPrice = item.originalPrice != null ? item.originalPrice : (item.price || 0);
-                                    const priceEdited = origPrice > 0 && effectivePrice !== origPrice;
-                                    const priceCell = priceEdited ? '<div class="invoice-price-cell"><div class="invoice-original-price">' + (origPrice||0).toLocaleString('vi-VN') + ' đ</div><div class="invoice-sale-price">' + effectivePrice.toLocaleString('vi-VN') + ' đ</div></div>' : (effectivePrice.toLocaleString('vi-VN') + ' đ');
-                                    return `
+                const beforeDiscount = (item.price || 0) * (item.quantity || 0);
+                const isVnd = (item.discountType || 'vnd') === 'vnd';
+                const discountVal = item.discount || 0;
+                const discountAmount = isVnd ? Math.min(discountVal, beforeDiscount) : (beforeDiscount * discountVal / 100);
+                const subtotal = Math.max(0, beforeDiscount - discountAmount);
+                const effectivePrice = (item.quantity || 1) > 0 ? Math.round(subtotal / (item.quantity || 1)) : 0;
+                const origPrice = item.originalPrice != null ? item.originalPrice : (item.price || 0);
+                const priceEdited = origPrice > 0 && effectivePrice !== origPrice;
+                const priceCell = priceEdited ? '<div class="invoice-price-cell"><div class="invoice-original-price">' + (origPrice || 0).toLocaleString('vi-VN') + ' đ</div><div class="invoice-sale-price">' + effectivePrice.toLocaleString('vi-VN') + ' đ</div></div>' : (effectivePrice.toLocaleString('vi-VN') + ' đ');
+                return `
                                     <tr>
                                         <td class="col-tt">${index + 1}</td>
                                         <td class="product-name col-product">${item.name || 'N/A'}</td>
@@ -18323,7 +18727,7 @@ class HamobileBanhang {
                                         <td class="col-total">${subtotal.toLocaleString('vi-VN')} đ</td>
                                     </tr>
                                     `;
-                                }).join('')}
+            }).join('')}
                             </tbody>
                         </table>
 
@@ -18378,12 +18782,12 @@ class HamobileBanhang {
                 </body>
                 </html>
             `);
-            
+
             invoiceWindow.document.close();
             invoiceWindow.focus();
-            
+
             this.showNotification(`✅ Đã mở hóa đơn chuyên nghiệp ${order.id}`, 'success');
-            
+
         } catch (error) {
             console.error('Lỗi in hóa đơn:', error);
             this.showNotification('❌ Lỗi in hóa đơn: ' + error.message, 'error');
@@ -18394,11 +18798,11 @@ class HamobileBanhang {
     printInvoiceWithVAT(index) {
         console.log('=== PRINTING INVOICE WITH VAT ===');
         console.log('Index:', index);
-        
+
         try {
             const order = this.demoData.orders[index];
             console.log('Order data:', order);
-            
+
             if (!order) {
                 this.showNotification('❌ Không tìm thấy đơn hàng!', 'error');
                 return;
@@ -18406,7 +18810,7 @@ class HamobileBanhang {
 
             // Show VAT adjustment popup
             this.showVATAdjustmentPopup(index);
-            
+
         } catch (error) {
             console.error('Lỗi in hóa đơn VAT:', error);
             this.showNotification('❌ Lỗi in hóa đơn VAT: ' + error.message, 'error');
@@ -18446,9 +18850,9 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', vatPopupHTML);
-        
+
         // Initialize VAT preview
         this.updateVATPreview(10, orderIndex);
     }
@@ -18460,7 +18864,7 @@ class HamobileBanhang {
         const subtotal = order.total;
         const vatAmount = (subtotal * vatRate) / 100;
         const totalWithVAT = subtotal + vatAmount;
-        
+
         const previewElement = document.getElementById('vat-preview');
         if (previewElement) {
             previewElement.innerHTML = `
@@ -18485,7 +18889,7 @@ class HamobileBanhang {
         try {
             const order = this.demoData.orders[orderIndex];
             const vatRate = parseFloat(vatPercent) || 0;
-            
+
             if (!order) {
                 this.showNotification('❌ Không tìm thấy đơn hàng!', 'error');
                 return;
@@ -18498,15 +18902,15 @@ class HamobileBanhang {
             }
 
             // Find customer info
-            const customer = this.demoData.customers.find(c => c.id === order.customerId) || { 
-                name: order.customerName, 
-                phone: order.customOrderPhone || 'Không có', 
-                address: order.customerAddress || 'Không có' 
+            const customer = this.demoData.customers.find(c => c.id === order.customerId) || {
+                name: order.customerName,
+                phone: order.customOrderPhone || 'Không có',
+                address: order.customerAddress || 'Không có'
             };
-            
+
             // HOSTING SOLUTION: Get company settings + global assets
             const companySettings = this.getCompanySettings();
-            
+
             // Override with global assets if available (for hosting)
             if (window.companyAssets && window.companyAssets.logo) {
                 companySettings.logo = window.companyAssets.logo;
@@ -18514,7 +18918,7 @@ class HamobileBanhang {
             if (window.companyAssets && window.companyAssets.qr) {
                 companySettings.qrCode = window.companyAssets.qr;
             }
-            
+
             console.log('✅ HOSTING READY - Logo/QR from global assets');
             console.log('Logo data:', companySettings.logo ? 'Found' : 'Not found');
             console.log('QR data:', companySettings.qrCode ? 'Found' : 'Not found');
@@ -18523,22 +18927,22 @@ class HamobileBanhang {
             const subtotal = order.total;
             const vatAmount = (subtotal * vatRate) / 100;
             const totalWithVAT = subtotal + vatAmount;
-            
+
             // Close the VAT popup
             const popup = document.querySelector('div[style*="fixed"]');
             if (popup) popup.remove();
-            
+
             // Professional invoice window with VAT
             const invoiceWindow = window.open('', '_blank', 'width=800,height=900');
-            
+
             if (!invoiceWindow) {
                 this.showNotification('❌ Popup bị chặn! Hãy cho phép popup.', 'error');
                 return;
             }
-            
+
             invoiceWindow.document.write(`
                 <!DOCTYPE html>
-                <html lang="vi">
+                <html dir="ltr" lang="vi">
                 <head>
                     <meta charset="UTF-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -18697,16 +19101,16 @@ class HamobileBanhang {
                             </thead>
                             <tbody>
                                 ${(order.products || []).map((item, index) => {
-                                    const beforeDiscount = (item.price || 0) * (item.quantity || 0);
-                                    const isVnd = (item.discountType || 'vnd') === 'vnd';
-                                    const discountVal = item.discount || 0;
-                                    const discountAmount = isVnd ? Math.min(discountVal, beforeDiscount) : (beforeDiscount * discountVal / 100);
-                                    const subtotal = Math.max(0, beforeDiscount - discountAmount);
-                                    const effectivePrice = (item.quantity || 1) > 0 ? Math.round(subtotal / (item.quantity || 1)) : 0;
-                                    const origPrice = item.originalPrice != null ? item.originalPrice : (item.price || 0);
-                                    const priceEdited = origPrice > 0 && effectivePrice !== origPrice;
-                                    const priceCell = priceEdited ? '<div class="invoice-price-cell"><div class="invoice-original-price">' + (origPrice||0).toLocaleString('vi-VN') + ' đ</div><div class="invoice-sale-price">' + effectivePrice.toLocaleString('vi-VN') + ' đ</div></div>' : (effectivePrice.toLocaleString('vi-VN') + ' đ');
-                                    return `
+                const beforeDiscount = (item.price || 0) * (item.quantity || 0);
+                const isVnd = (item.discountType || 'vnd') === 'vnd';
+                const discountVal = item.discount || 0;
+                const discountAmount = isVnd ? Math.min(discountVal, beforeDiscount) : (beforeDiscount * discountVal / 100);
+                const subtotal = Math.max(0, beforeDiscount - discountAmount);
+                const effectivePrice = (item.quantity || 1) > 0 ? Math.round(subtotal / (item.quantity || 1)) : 0;
+                const origPrice = item.originalPrice != null ? item.originalPrice : (item.price || 0);
+                const priceEdited = origPrice > 0 && effectivePrice !== origPrice;
+                const priceCell = priceEdited ? '<div class="invoice-price-cell"><div class="invoice-original-price">' + (origPrice || 0).toLocaleString('vi-VN') + ' đ</div><div class="invoice-sale-price">' + effectivePrice.toLocaleString('vi-VN') + ' đ</div></div>' : (effectivePrice.toLocaleString('vi-VN') + ' đ');
+                return `
                                     <tr>
                                         <td class="col-tt">${index + 1}</td>
                                         <td class="product-name col-product">${item.name || 'N/A'}</td>
@@ -18715,7 +19119,7 @@ class HamobileBanhang {
                                         <td class="col-total">${subtotal.toLocaleString('vi-VN')} đ</td>
                                     </tr>
                                     `;
-                                }).join('')}
+            }).join('')}
                             </tbody>
                         </table>
 
@@ -18749,12 +19153,12 @@ class HamobileBanhang {
                 </body>
                 </html>
             `);
-            
+
             invoiceWindow.document.close();
             invoiceWindow.focus();
-            
+
             this.showNotification(`✅ Đã mở hóa đơn VAT ${vatRate}% cho đơn hàng ${order.id}`, 'success');
-            
+
         } catch (error) {
             console.error('Lỗi in hóa đơn VAT:', error);
             this.showNotification('❌ Lỗi in hóa đơn VAT: ' + error.message, 'error');
@@ -18856,7 +19260,7 @@ class HamobileBanhang {
             const reportWindow = window.open('', '_blank');
             reportWindow.document.write(`
                 <!DOCTYPE html>
-                <html>
+                <html dir="ltr" lang="vi">
                 <head>
                     <meta charset="utf-8">
                     <title>Báo cáo công nợ - ${safeText(customer.name)}</title>
@@ -19243,7 +19647,7 @@ class HamobileBanhang {
     }
 
     // ===== BỘ LỌC NGÀY THÁNG CHO BÁO CÁO =====
-    
+
     // Khởi tạo filter state
     initFilterState() {
         if (!this.filterState) {
@@ -19306,7 +19710,7 @@ class HamobileBanhang {
     toggleFilterSection() {
         const content = document.getElementById('filter-content');
         const icon = document.getElementById('filter-toggle-icon');
-        
+
         if (content.style.display === 'none') {
             content.style.display = 'block';
             icon.textContent = '📁';
@@ -19342,7 +19746,7 @@ class HamobileBanhang {
     applyDateFilter() {
         const fromDate = document.getElementById('filter-from-date').value;
         const toDate = document.getElementById('filter-to-date').value;
-        
+
         if (!fromDate || !toDate) {
             this.showNotification('Vui lòng chọn đầy đủ ngày bắt đầu và kết thúc', 'warning');
             return;
@@ -19447,7 +19851,7 @@ class HamobileBanhang {
         // Cập nhật các card thống kê
         const revenueCard = document.querySelector('.stat-card.revenue .stat-value');
         const profitCard = document.querySelector('.stat-card.info .stat-value');
-        
+
         if (revenueCard) {
             revenueCard.textContent = revenue.toLocaleString('vi-VN') + ' VNĐ';
         }
@@ -19493,7 +19897,7 @@ class HamobileBanhang {
 
         // Tạo HTML cho danh sách đơn hàng đã lọc
         let ordersHTML = '';
-        
+
         if (filteredOrders.length === 0) {
             ordersHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: #6b7280;">Không có đơn hàng nào trong khoảng thời gian này</td></tr>';
         } else {
@@ -19502,7 +19906,7 @@ class HamobileBanhang {
                 const customerName = customer ? customer.name : 'N/A';
                 const statusClass = order.status === 'Hoàn thành' ? 'success' : (order.status === 'Đang xử lý' ? 'warning' : 'info');
                 const paymentClass = order.paymentStatus === 'Đã thanh toán' ? 'success' : 'warning';
-                
+
                 return `
                     <tr>
                         <td>#${order.id}</td>
@@ -19584,7 +19988,7 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', exportHTML);
 
         this.applyExportQuickFilter('exportSales', 'this-month');
@@ -19806,19 +20210,19 @@ class HamobileBanhang {
                 { header: 'Thanh toán', getValue: sale => sale.paymentStatus },
                 { header: 'Trạng thái', getValue: sale => sale.status }
             ];
-            
+
             const title = `Báo cáo doanh thu (${this.formatDateForDisplay(fromDate)} - ${this.formatDateForDisplay(toDate)})`;
             this.showDataViewer(title, salesData, columns);
 
         } else if (mode === 'download') {
             // Tải xuống CSV
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 `Báo cáo Doanh thu (${this.formatDateForDisplay(fromDate)} - ${this.formatDateForDisplay(toDate)})\n` +
                 "Mã đơn,Khách hàng,Ngày,Số sản phẩm,Doanh thu ghi nhận,Thanh toán,Trạng thái\n" +
-                salesData.map(s => 
+                salesData.map(s =>
                     `${s.id},"${s.customer}","${s.date}",${s.items},${s.total},"${s.paymentStatus}","${s.status}"`
                 ).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -19826,7 +20230,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification(`Đã tải xuống báo cáo doanh thu (${salesData.length} đơn hàng)`, 'success');
         }
     }
@@ -19889,7 +20293,7 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', exportHTML);
 
         this.applyExportQuickFilter('exportProducts', 'this-month');
@@ -19916,7 +20320,7 @@ class HamobileBanhang {
 
         // Sắp xếp đơn hàng trước khi tính toán
         const sortedFilteredOrders = this.sortOrdersByDate(filteredOrders);
-        
+
         // Tính toán top sản phẩm (doanh thu = sau giảm từng món + phân bổ giảm cấp đơn — khớp POS / calcOrderProfit)
         const productSales = {};
         sortedFilteredOrders.forEach(order => {
@@ -19987,20 +20391,20 @@ class HamobileBanhang {
                 { header: 'Doanh thu (VNĐ)', getValue: product => product.revenue.toLocaleString('vi-VN') },
                 { header: 'Lợi nhuận (VNĐ)', getValue: product => (product.cost || 0) > 0 ? (product.revenue - product.cost).toLocaleString('vi-VN') : '-' }
             ];
-            
+
             const title = `Top sản phẩm bán chạy (${this.formatDateForDisplay(fromDate)} - ${this.formatDateForDisplay(toDate)})`;
             this.showDataViewer(title, topProducts, columns);
 
         } else if (mode === 'download') {
             // Tải xuống CSV
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 `Top sản phẩm bán chạy (${this.formatDateForDisplay(fromDate)} - ${this.formatDateForDisplay(toDate)})\n` +
                 "Xếp hạng,Mã SP,Tên sản phẩm,Đã bán,Tồn kho,Doanh thu,Lợi nhuận\n" +
                 topProducts.map((p, index) => {
                     const profit = (p.cost || 0) > 0 ? (p.revenue - p.cost) : '';
                     return `${index + 1},${p.id},"${p.name}",${p.sold},${p.stock},${p.revenue},${profit}`;
                 }).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -20008,7 +20412,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification(`Đã tải xuống báo cáo top sản phẩm (${topProducts.length} sản phẩm)`, 'success');
         }
     }
@@ -20071,7 +20475,7 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', exportHTML);
 
         this.applyExportQuickFilter('exportFinancial', 'this-month');
@@ -20150,15 +20554,15 @@ class HamobileBanhang {
                 { header: 'Danh mục', getValue: item => item.category },
                 { header: 'Giá trị', getValue: item => item.value }
             ];
-            
+
             const title = `Báo cáo tài chính (${this.formatDateForDisplay(fromDate)} - ${this.formatDateForDisplay(toDate)})`;
             this.showDataViewer(title, financialData, columns);
 
         } else if (mode === 'download') {
             // Tải xuống CSV
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 financialData.map(row => `"${row.category}","${row.value}"`).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -20166,7 +20570,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification('Đã tải xuống báo cáo tài chính tổng hợp', 'success');
         }
     }
@@ -20219,7 +20623,7 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', exportHTML);
 
         // Tải danh mục vào select
@@ -20274,7 +20678,7 @@ class HamobileBanhang {
                 { header: 'Giá trị (VNĐ)', getValue: product => (product.price * product.stock).toLocaleString('vi-VN') },
                 { header: 'Nhà cung cấp', getValue: product => product.supplier || 'N/A' }
             ];
-            
+
             const filterDesc = this.getInventoryFilterDescription(inventoryFilter, categoryFilter);
             const title = `Báo cáo tồn kho - ${filterDesc}`;
             this.showDataViewer(title, filteredProducts, columns);
@@ -20282,13 +20686,13 @@ class HamobileBanhang {
         } else if (mode === 'download') {
             // Tải xuống CSV
             const filterDesc = this.getInventoryFilterDescription(inventoryFilter, categoryFilter);
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 `Báo cáo Tồn kho - ${filterDesc}\n` +
                 "Mã SP,Tên sản phẩm,Danh mục,Giá bán,Tồn kho,Giá trị,Nhà cung cấp\n" +
-                filteredProducts.map(p => 
+                filteredProducts.map(p =>
                     `${p.id},"${p.name}","${p.category}",${p.price},${p.stock},${p.price * p.stock},"${p.supplier || ''}"`
                 ).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -20297,7 +20701,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification(`Đã tải xuống báo cáo tồn kho (${filteredProducts.length} sản phẩm)`, 'success');
         }
     }
@@ -20305,16 +20709,16 @@ class HamobileBanhang {
     // Mô tả bộ lọc tồn kho
     getInventoryFilterDescription(inventoryFilter, categoryFilter) {
         let desc = '';
-        
+
         if (inventoryFilter === 'lowStock') desc = 'Sắp hết hàng';
-        else if (inventoryFilter === 'outOfStock') desc = 'Hết hàng';  
+        else if (inventoryFilter === 'outOfStock') desc = 'Hết hàng';
         else if (inventoryFilter === 'highStock') desc = 'Nhiều hàng';
         else desc = 'Tất cả';
-        
+
         if (categoryFilter !== 'all') {
             desc += ` - ${categoryFilter}`;
         }
-        
+
         return desc;
     }
 
@@ -20390,7 +20794,7 @@ class HamobileBanhang {
                 </div>
             </div>
         `;
-        
+
         document.body.insertAdjacentHTML('beforeend', exportHTML);
     }
 
@@ -20440,7 +20844,8 @@ class HamobileBanhang {
                 { header: 'Điện thoại', getValue: customer => customer.phone || 'N/A' },
                 { header: 'Email', getValue: customer => customer.email || 'N/A' },
                 { header: 'Số nợ (VNĐ)', getValue: customer => (customer.actualDebt || 0).toLocaleString('vi-VN') },
-                { header: 'Hành động', getValue: customer => `
+                {
+                    header: 'Hành động', getValue: customer => `
                     <button onclick="app.showCustomerDebtDetail('${customer.id}')" style="
                         background: #059669; 
                         color: white; 
@@ -20455,7 +20860,7 @@ class HamobileBanhang {
                     </button>
                 ` }
             ];
-            
+
             const filterDesc = this.getDebtFilterDescription(debtFilter, customerTypeFilter);
             const title = `Báo cáo công nợ - ${filterDesc}`;
             this.showDataViewer(title, customersWithDebt, columns);
@@ -20464,17 +20869,17 @@ class HamobileBanhang {
             // Tải xuống CSV
             const filterDesc = this.getDebtFilterDescription(debtFilter, customerTypeFilter);
             const totalDebt = customersWithDebt.reduce((sum, c) => sum + (c.actualDebt || 0), 0);
-            
-            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + 
+
+            const csvContent = "data:text/csv;charset=utf-8,\uFEFF" +
                 `Báo cáo Công nợ - ${filterDesc}\n` +
                 `Tổng số khách hàng: ${customersWithDebt.length}\n` +
                 `Tổng số nợ: ${totalDebt.toLocaleString('vi-VN')} VNĐ\n` +
                 `Ngày báo cáo: ${this.getVietnamTime().toLocaleDateString('vi-VN')}\n\n` +
                 "Mã KH,Tên khách hàng,Loại KH,Điện thoại,Email,Số nợ\n" +
-                customersWithDebt.map(c => 
+                customersWithDebt.map(c =>
                     `${c.id || ''},"${c.name || ''}","${c.type === 'doanh-nghiep' ? 'Doanh nghiệp' : (c.type === 'ca-nhan' ? 'Cá nhân' : 'Chưa phân loại')}","${c.phone || ''}","${c.email || ''}",${c.actualDebt || 0}`
                 ).join('\n');
-            
+
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
@@ -20483,7 +20888,7 @@ class HamobileBanhang {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             this.showNotification(`Đã tải xuống báo cáo công nợ (${customersWithDebt.length} khách hàng)`, 'success');
         }
     }
@@ -20491,18 +20896,18 @@ class HamobileBanhang {
     // Mô tả bộ lọc công nợ
     getDebtFilterDescription(debtFilter, customerTypeFilter) {
         let desc = '';
-        
+
         if (debtFilter === 'low') desc = 'Nợ thấp';
         else if (debtFilter === 'medium') desc = 'Nợ trung bình';
         else if (debtFilter === 'high') desc = 'Nợ cao';
         else desc = 'Tất cả mức nợ';
-        
+
         if (customerTypeFilter === 'ca-nhan') {
             desc += ' - Cá nhân';
         } else if (customerTypeFilter === 'doanh-nghiep') {
             desc += ' - Doanh nghiệp';
         }
-        
+
         return desc;
     }
 }
@@ -20578,7 +20983,7 @@ app = new HamobileBanhang();
 window.app = app;
 
 window._modalMousedownTarget = null;
-document.addEventListener('mousedown', function(e) { window._modalMousedownTarget = e.target; }, true);
+document.addEventListener('mousedown', function (e) { window._modalMousedownTarget = e.target; }, true);
 
 // Global function to close modal (called from onclick)
 function closeModal(element) {
@@ -20604,10 +21009,10 @@ function showNotification(message, type = 'info', durationMs = 3000, longForm = 
 function toggleMobileMenu() {
     const navMenu = document.getElementById('mainNavMenu');
     const overlay = document.getElementById('mobileOverlay');
-    
+
     if (navMenu && overlay) {
         const isOpen = navMenu.classList.contains('mobile-open');
-        
+
         if (isOpen) {
             navMenu.classList.remove('mobile-open');
             overlay.classList.remove('active');
@@ -20619,7 +21024,7 @@ function toggleMobileMenu() {
 }
 
 // Đóng menu mobile khi bấm vào mục menu (dùng event delegation để chắc chắn hoạt động)
-document.addEventListener('click', function(e) {
+document.addEventListener('click', function (e) {
     if (e.target.closest('.nav-item') && window.innerWidth <= 768) {
         const navMenu = document.getElementById('mainNavMenu');
         const overlay = document.getElementById('mobileOverlay');
@@ -20631,13 +21036,13 @@ document.addEventListener('click', function(e) {
 });
 
 // Handle window resize - close menu on larger screens
-document.addEventListener('DOMContentLoaded', function() {
-    window.addEventListener('popstate', function() {
+document.addEventListener('DOMContentLoaded', function () {
+    window.addEventListener('popstate', function () {
         if (window.app && typeof window.app.handleOrdersMobilePopState === 'function') {
             window.app.handleOrdersMobilePopState();
         }
     });
-    window.addEventListener('resize', function() {
+    window.addEventListener('resize', function () {
         if (window.innerWidth > 768) {
             const navMenu = document.getElementById('mainNavMenu');
             const overlay = document.getElementById('mobileOverlay');

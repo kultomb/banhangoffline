@@ -1,0 +1,17 @@
+[package]
+name    = "license-generator"
+version = "1.0.0"
+edition = "2021"
+description = "HangHoa POS — Admin License Key Generator (offline, internal use only)"
+
+[[bin]]
+name = "license-generator"
+path = "src/main.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand          = "0.8"
+sha2          = "0.10"
+base64        = "0.22"
+eframe        = "0.28"
+rfd           = "0.15"
