@@ -3264,22 +3264,36 @@ class HamobileBanhang {
     // - Từ khóa >= 4 ký tự: cho phép khớp chuỗi con để "THUO" tìm được "THƯỜNG"
     searchMatchWordBoundary(text, query) {
         if (!query || !String(query).trim()) return true;
-        const t = this.removeAccents((text || '').toLowerCase());
-        const q = this.removeAccents(String(query).trim().toLowerCase());
+        const rawQ = String(query).trim().toLowerCase();
+        const rawT = (text || '').toLowerCase();
+        const t = this.removeAccents(rawT);
+        const q = this.removeAccents(rawQ);
         const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-        // N?u query l? s? thu?n t?y (VD: "12", "13", "14"), KH?NG cho ph?p kh?p ti?n t? v?i dung l??ng b? nh? (nh? 128GB, 256GB)
+        // Nếu query là số thuần túy (VD: "12", "13", "14"), KHÔNG cho phép khớp tiền tố với dung lượng bộ nhớ (như 128GB, 256GB)
         if (/^\d+$/.test(q)) {
             const rePureNumber = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[^0-9]|$)', 'i');
             return rePureNumber.test(' ' + t + ' ');
         }
 
+        // TẦNG 1: Kiểm tra xem từ khóa gõ vào có chứa DẤU tiếng Việt hay không (VD: "CỦ", "SẠC", "HỒNG")
+        const hasAccentInQuery = /[àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i.test(rawQ);
+        if (hasAccentInQuery) {
+            // Nếu gõ CÓ DẤU, từ đó phải khớp tiền tố có dấu ở đầu từ trong tên gốc (tránh "CỦ" khớp với "CỤM")
+            const rawEsc = rawQ.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const reAccentWordStart = new RegExp('(?:^|[^a-z0-9àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ])' + rawEsc, 'i');
+            if (!reAccentWordStart.test(' ' + rawT + ' ')) {
+                return false;
+            }
+        }
+
+        // TẦNG 2: Khớp nguyên từ hoặc khớp tiền tố ở đầu từ (Word-Start Prefix Match)
         const reFull = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[^a-z0-9]|$)', 'i');
         if (reFull.test(' ' + t + ' ')) return true;
-        if (/\d/.test(q)) {
-            const rePrefix = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[a-z0-9])', 'i');
-            return rePrefix.test(' ' + t + ' ');
-        }
+
+        const rePrefix = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[a-z0-9])', 'i');
+        if (rePrefix.test(' ' + t + ' ')) return true;
+
         if (q.length >= 4 && t.includes(q)) return true;
         return false;
     }
@@ -4655,15 +4669,36 @@ class HamobileBanhang {
         if (modal) modal.remove();
     }
     productSearchRelevance(p, term) {
-        const words = term.split(/\s+/).filter(w => w.length > 0);
-        const nameNorm = this.removeAccents((p.name || '').toLowerCase().trim());
+        if (!term || !String(term).trim()) return 0;
+        const words = String(term).trim().toLowerCase().split(/\s+/).filter(w => w.length > 0);
+        const rawName = (p.name || '').toLowerCase().trim();
+        const nameNorm = this.removeAccents(rawName);
         let score = 0;
+
+        const normTerm = this.removeAccents(String(term).trim().toLowerCase());
+        if (nameNorm.startsWith(normTerm)) score += 20;
+
         for (const word of words) {
             const q = this.removeAccents(word);
             const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const atStart = new RegExp('^' + esc + '(?=[^a-z0-9]|$)', 'i');
-            if (atStart.test(nameNorm)) score += 2;
-            else if (this.searchMatchWordBoundary(p.name || '', word)) score += 1;
+
+            // 1. Khớp NGUYÊN TỪ 100% (+10)
+            const reFull = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[^a-z0-9]|$)', 'i');
+            if (reFull.test(' ' + nameNorm + ' ')) {
+                score += 10;
+
+                // Thưởng điểm nếu khớp cả DẤU tiếng Việt (+5)
+                const hasAccent = /[àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i.test(word);
+                if (hasAccent) {
+                    const rawEsc = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const reAccentFull = new RegExp('(?:^|[^a-z0-9àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ])' + rawEsc + '(?=[^a-z0-9àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]|$)', 'i');
+                    if (reAccentFull.test(' ' + rawName + ' ')) score += 5;
+                }
+            } else {
+                // 2. Chỉ khớp TIỀN TỐ ở đầu từ (+3)
+                const rePrefix = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[a-z0-9])', 'i');
+                if (rePrefix.test(' ' + nameNorm + ' ')) score += 3;
+            }
         }
         return score;
     }
