@@ -3267,6 +3267,13 @@ class HamobileBanhang {
         const t = this.removeAccents((text || '').toLowerCase());
         const q = this.removeAccents(String(query).trim().toLowerCase());
         const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+        // N?u query l? s? thu?n t?y (VD: "12", "13", "14"), KH?NG cho ph?p kh?p ti?n t? v?i dung l??ng b? nh? (nh? 128GB, 256GB)
+        if (/^\d+$/.test(q)) {
+            const rePureNumber = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[^0-9]|$)', 'i');
+            return rePureNumber.test(' ' + t + ' ');
+        }
+
         const reFull = new RegExp('(?:^|[^a-z0-9])' + esc + '(?=[^a-z0-9]|$)', 'i');
         if (reFull.test(' ' + t + ' ')) return true;
         if (/\d/.test(q)) {
@@ -4690,7 +4697,22 @@ class HamobileBanhang {
             return;
         }
         let products = (this.demoData.products || []).filter(p => this.productMatchesSearchQuery(p, term));
-        products.sort((a, b) => this.productSearchRelevance(b, term) - this.productSearchRelevance(a, term));
+        // S?p x?p ?u ti?n: C?n h?ng l?n tr?n + ?o kh?p t? kh?a + S? t?n kho
+        products.sort((a, b) => {
+            const stockA = this.getProductStockCount(a) > 0 ? 1 : 0;
+            const stockB = this.getProductStockCount(b) > 0 ? 1 : 0;
+            if (stockA !== stockB) {
+                return stockB - stockA; // C?n h?ng (1) l?n tr??c H?t h?ng (0)
+            }
+            if (term) {
+                const relA = this.productSearchRelevance ? this.productSearchRelevance(a, term) : 0;
+                const relB = this.productSearchRelevance ? this.productSearchRelevance(b, term) : 0;
+                if (relA !== relB) {
+                    return relB - relA;
+                }
+            }
+            return this.getProductStockCount(b) - this.getProductStockCount(a);
+        });
         if (!products.length) {
             listEl.innerHTML = '<div style="padding: 24px; text-align: center; color: #6b7280; font-size: 14px;">Không tìm thấy sản phẩm phù hợp</div>';
             return;
@@ -4835,7 +4857,22 @@ class HamobileBanhang {
             return;
         }
         let products = (this.demoData.products || []).filter(p => this.productMatchesSearchQuery(p, term));
-        products.sort((a, b) => this.productSearchRelevance(b, term) - this.productSearchRelevance(a, term));
+        // S?p x?p ?u ti?n: C?n h?ng l?n tr?n + ?o kh?p t? kh?a + S? t?n kho
+        products.sort((a, b) => {
+            const stockA = this.getProductStockCount(a) > 0 ? 1 : 0;
+            const stockB = this.getProductStockCount(b) > 0 ? 1 : 0;
+            if (stockA !== stockB) {
+                return stockB - stockA; // C?n h?ng (1) l?n tr??c H?t h?ng (0)
+            }
+            if (term) {
+                const relA = this.productSearchRelevance ? this.productSearchRelevance(a, term) : 0;
+                const relB = this.productSearchRelevance ? this.productSearchRelevance(b, term) : 0;
+                if (relA !== relB) {
+                    return relB - relA;
+                }
+            }
+            return this.getProductStockCount(b) - this.getProductStockCount(a);
+        });
         products = products.slice(0, 15);
         if (!products.length) {
             resultsEl.style.display = 'block';
@@ -17700,7 +17737,22 @@ class HamobileBanhang {
             return;
         }
         let products = (this.demoData.products || []).filter(p => this.productMatchesSearchQuery(p, term));
-        products.sort((a, b) => this.productSearchRelevance(b, term) - this.productSearchRelevance(a, term));
+        // S?p x?p ?u ti?n: C?n h?ng l?n tr?n + ?o kh?p t? kh?a + S? t?n kho
+        products.sort((a, b) => {
+            const stockA = this.getProductStockCount(a) > 0 ? 1 : 0;
+            const stockB = this.getProductStockCount(b) > 0 ? 1 : 0;
+            if (stockA !== stockB) {
+                return stockB - stockA; // C?n h?ng (1) l?n tr??c H?t h?ng (0)
+            }
+            if (term) {
+                const relA = this.productSearchRelevance ? this.productSearchRelevance(a, term) : 0;
+                const relB = this.productSearchRelevance ? this.productSearchRelevance(b, term) : 0;
+                if (relA !== relB) {
+                    return relB - relA;
+                }
+            }
+            return this.getProductStockCount(b) - this.getProductStockCount(a);
+        });
         products = products.slice(0, 15);
         if (!products.length) {
             resultsEl.style.display = 'block';
