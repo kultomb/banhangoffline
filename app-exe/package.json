@@ -1,0 +1,21 @@
+{
+  "name": "hanghoa-pos-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HangHoa POS — Desktop wrapper (Tauri + Windows .exe)",
+  "scripts": {
+    "dev": "npx serve ../../public/legacy -p 1420 --no-clipboard",
+    "tauri:dev": "npx @tauri-apps/cli dev",
+    "tauri:build": "node build-versioned.js",
+    "tauri:build:raw": "npx @tauri-apps/cli build",
+    "tauri:icon": "npx @tauri-apps/cli icon src-tauri/icons/source.png",
+    "clean": "if exist src-tauri\\target rd /s /q src-tauri\\target"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "serve": "^14"
+  }
+}

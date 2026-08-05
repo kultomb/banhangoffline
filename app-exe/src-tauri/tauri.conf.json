@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "HangHoa POS",
+  "version": "1.0.0",
+  "identifier": "com.hanghoa.pos",
+
+  "build": {
+    "frontendDist": "../../public/legacy",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "HangHoa POS",
+        "width": 1920,
+        "height": 1080,
+        "minWidth": 1280,
+        "minHeight": 720,
+        "center": true,
+        "resizable": true,
+        "maximized": false,
+        "fullscreen": false,
+        "visible": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false
+      }
+    ],
+
+    "security": {
+      "csp": null,
+      "dangerousDisableAssetCspModification": false
+    },
+
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": false,
+      "menuOnLeftClick": false,
+      "title": "HangHoa POS",
+      "tooltip": "HangHoa POS — Quản lý bán hàng"
+    }
+  },
+
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "certificateThumbprint": null,
+      "timestampUrl": "",
+      "tsp": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["English"],
+        "startMenuFolder": "HangHoa POS",
+        "installMode": "perMachine"
+      }
+    },
+    "publisher": "HangHoa POS",
+    "copyright": "© 2026 HangHoa POS",
+    "category": "Business",
+    "shortDescription": "Phần mềm quản lý bán hàng offline",
+    "longDescription": "HangHoa POS — Hệ thống quản lý bán hàng chạy hoàn toàn offline, không cần internet. Hỗ trợ quản lý sản phẩm, đơn hàng, khách hàng và báo cáo doanh thu.",
+    "resources": []
+  }
+}
