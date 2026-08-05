@@ -2046,16 +2046,26 @@ class HamobileBanhang {
             item.addEventListener('click', (e) => {
                 e.preventDefault();
                 const page = item.getAttribute('data-page');
-                this.loadPage(page);
+                const targetHash = page || 'dashboard';
                 this.setActiveNav(item);
-                window.location.hash = page || 'dashboard';
                 if (window.innerWidth <= 768 && typeof toggleMobileMenu === 'function') toggleMobileMenu();
+                
+                if (window.location.hash === '#' + targetHash) {
+                    if (this.currentPage !== page) {
+                        this.loadPage(page);
+                    }
+                } else {
+                    // Cập nhật hash sẽ tự động kích hoạt sự kiện hashchange để gọi loadPage(page) đúng 1 lần
+                    window.location.hash = targetHash;
+                }
             });
         });
         window.addEventListener('hashchange', () => {
             const page = (window.location.hash || '#dashboard').replace('#', '') || 'dashboard';
             if (page && this.getPageTitles(page).title) {
-                this.loadPage(page);
+                if (this.currentPage !== page) {
+                    this.loadPage(page);
+                }
                 const navEl = document.querySelector(`.nav-item[data-page="${page}"]`);
                 if (navEl) this.setActiveNav(navEl);
             }
