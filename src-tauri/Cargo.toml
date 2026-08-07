@@ -1,6 +1,6 @@
 [package]
 name = "hangho-pos"
-version = "1.0.2"
+version = "1.0.3"
 description = "Hangho POS — Quản lý bán hàng offline"
 authors = []
 edition = "2021"

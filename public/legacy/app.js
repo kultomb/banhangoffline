@@ -3025,8 +3025,14 @@ class HamobileBanhang {
     }
     searchMatch(text, query) {
         if (!query || !String(query).trim()) return true;
-        const t = this.removeAccents((text || '').toLowerCase());
-        const q = this.removeAccents(String(query).trim().toLowerCase());
+        const rawQ = String(query).trim().toLowerCase();
+        const rawT = (text || '').toLowerCase();
+        const hasAccent = /[àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i.test(rawQ);
+        if (hasAccent) {
+            return rawT.includes(rawQ);
+        }
+        const t = this.removeAccents(rawT);
+        const q = this.removeAccents(rawQ);
         return t.includes(q);
     }
     getOrderSearchText(order) {
@@ -3095,7 +3101,7 @@ class HamobileBanhang {
                 if (aliasMap[prefix]) {
                     const prefixOptions = aliasMap[prefix];
                     const options = [];
-                    options.push([normW]);
+                    options.push([w]);
                     prefixOptions.forEach(pOpt => {
                         const words = [...pOpt, num];
                         if (suffix) {
@@ -3112,12 +3118,12 @@ class HamobileBanhang {
                     groups.push(options);
                 } else {
                     // Nếu prefix KHÔNG PHẢI alias điện thoại (như X14, SP098, W20), giữ NGUYÊN từ dính liền "x14"
-                    groups.push([ [normW] ]);
+                    groups.push([ [w] ]);
                 }
             } else if (aliasMap[normW]) {
                 groups.push(aliasMap[normW]);
             } else {
-                groups.push([ [normW] ]);
+                groups.push([ [w] ]);
             }
         });
 
