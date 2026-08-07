@@ -3061,10 +3061,7 @@ class HamobileBanhang {
     
     expandPhoneSearchKeywords(query) {
         if (!query) return [];
-        let q = query.trim().toLowerCase();
-        
-        // Tách số và chữ dính liền (VD: "ip13prm" -> "ip 13 prm", "s23u" -> "s 23 u")
-        q = q.replace(/([a-zA-Z]+)(\d+)/g, '$1 $2').replace(/(\d+)([a-zA-Z]+)/g, '$1 $2');
+        let rawQ = query.trim().toLowerCase();
         
         // Bản đồ từ điển từ viết tắt ngành điện thoại (Lựa chọn đồng nghĩa: Từ gốc OR các tổ hợp dịch)
         const aliasMap = {
@@ -3080,12 +3077,44 @@ class HamobileBanhang {
             'ult': [ ['ult'], ['ultra'] ]
         };
 
-        const words = q.split(/\s+/).filter(w => w.length > 0);
+        const rawWords = rawQ.split(/\s+/).filter(w => w.length > 0);
         const groups = [];
 
-        words.forEach(w => {
+        rawWords.forEach(w => {
             const normW = this.removeAccents(w);
-            if (aliasMap[normW]) {
+            
+            // Kiểm tra xem từ có dạng chữ+số dính liền không (VD: ip13, x14, s23u)
+            const alphaNumMatch = normW.match(/^([a-z]+)(\d+)([a-z]*)$/);
+            
+            if (alphaNumMatch) {
+                const prefix = alphaNumMatch[1];
+                const num = alphaNumMatch[2];
+                const suffix = alphaNumMatch[3];
+                
+                // Nếu prefix nằm trong aliasMap (như ip, sam, ph), hỗ trợ vừa tìm dạng tách (iphone 13) vừa tìm dính liền (ip13)
+                if (aliasMap[prefix]) {
+                    const prefixOptions = aliasMap[prefix];
+                    const options = [];
+                    options.push([normW]);
+                    prefixOptions.forEach(pOpt => {
+                        const words = [...pOpt, num];
+                        if (suffix) {
+                            if (aliasMap[suffix]) {
+                                aliasMap[suffix].forEach(sOpt => options.push([...words, ...sOpt]));
+                            } else {
+                                words.push(suffix);
+                                options.push(words);
+                            }
+                        } else {
+                            options.push(words);
+                        }
+                    });
+                    groups.push(options);
+                } else {
+                    // Nếu prefix KHÔNG PHẢI alias điện thoại (như X14, SP098, W20), giữ NGUYÊN từ dính liền "x14"
+                    groups.push([ [normW] ]);
+                }
+            } else if (aliasMap[normW]) {
                 groups.push(aliasMap[normW]);
             } else {
                 groups.push([ [normW] ]);
