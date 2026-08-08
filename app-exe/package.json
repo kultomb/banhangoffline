@@ -1,6 +1,6 @@
 {
   "name": "hanghoa-pos-desktop",
-  "version": "1.0.5",
+  "version": "1.0.9",
   "private": true,
   "description": "HangHoa POS — Desktop wrapper (Tauri + Windows .exe)",
   "scripts": {

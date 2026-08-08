@@ -1,6 +1,7 @@
 # Node
 node_modules/
 npm-debug.log*
+.next/
 
 # Large Archives & Executables & Build Output
 app-exe.rar

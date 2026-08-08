@@ -1,6 +1,6 @@
 [package]
 name = "hangho-pos-desktop"
-version = "1.0.5"
+version = "1.0.9"
 description = "HangHoa POS — Phần mềm quản lý bán hàng offline dành cho Windows"
 authors = ["HangHoa POS"]
 edition = "2021"

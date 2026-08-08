@@ -7306,6 +7306,50 @@ class HamobileBanhang {
         }
     }
 
+    executePrintDocument(htmlContent, notificationMsg = 'Đang chuẩn bị in...') {
+        try {
+            let iframe = document.getElementById('app-print-iframe');
+            if (!iframe) {
+                iframe = document.createElement('iframe');
+                iframe.id = 'app-print-iframe';
+                iframe.name = 'app-print-iframe';
+                iframe.style.position = 'fixed';
+                iframe.style.right = '0';
+                iframe.style.bottom = '0';
+                iframe.style.width = '0';
+                iframe.style.height = '0';
+                iframe.style.border = '0';
+                iframe.style.visibility = 'hidden';
+                document.body.appendChild(iframe);
+            }
+            const doc = iframe.contentWindow.document;
+            doc.open();
+            doc.write(htmlContent);
+            doc.close();
+            setTimeout(() => {
+                try {
+                    iframe.contentWindow.focus();
+                    iframe.contentWindow.print();
+                } catch (err) {
+                    console.error('Lỗi khi gọi lệnh in trong iframe:', err);
+                }
+            }, 300);
+            if (notificationMsg) this.showNotification(notificationMsg, 'info');
+        } catch (e) {
+            console.error('Lỗi khởi tạo iframe in:', e);
+            // Fallback popup if iframe fails
+            const pw = window.open('', '_blank', 'width=900,height=900');
+            if (!pw) {
+                this.showNotification('Không thể mở lệnh in. Vui lòng thử lại!', 'error');
+                return;
+            }
+            pw.document.write(htmlContent);
+            pw.document.close();
+            pw.focus();
+            if (notificationMsg) this.showNotification(notificationMsg, 'info');
+        }
+    }
+
     printRepair(index) {
         const r = this.demoData.repairs[index];
         if (!r) {
@@ -7320,12 +7364,7 @@ class HamobileBanhang {
         const companySettings = this.getCompanySettings();
         if (window.companyAssets && window.companyAssets.logo) companySettings.logo = window.companyAssets.logo;
 
-        const pw = window.open('', '_blank', 'width=800,height=900');
-        if (!pw) {
-            this.showNotification('Popup bị chặn! Hãy cho phép popup.', 'error');
-            return;
-        }
-        pw.document.write(`
+        const htmlContent = `
             <!DOCTYPE html>
             <html dir="ltr" lang="vi">
             <head>
@@ -7420,7 +7459,7 @@ class HamobileBanhang {
                     </div>
                     <div class="print-buttons no-print">
                         <button class="btn btn-print" onclick="window.print()">🖨️ In phiếu</button>
-                        <button class="btn btn-close" onclick="window.close()">❌ Đóng</button>
+                        <button class="btn btn-close" onclick="if(window.name!=='app-print-iframe')window.close()">❌ Đóng</button>
                     </div>
                     <div class="footer-info">
                         <p><strong>Cảm ơn quý khách đã sử dụng dịch vụ!</strong></p>
@@ -7428,9 +7467,8 @@ class HamobileBanhang {
                 </div>
             </body>
             </html>
-        `);
-        pw.document.close();
-        pw.focus();
+        `;
+        this.executePrintDocument(htmlContent, `Đang in phiếu sửa chữa ${repairId}`);
     }
 
     // Tính lợi nhuận thực theo giá vốn từng sản phẩm. Bỏ qua đơn đã hủy/trả hàng.
@@ -8106,19 +8144,13 @@ class HamobileBanhang {
                     window.onload = function () {
                         setTimeout(function () { window.print(); }, 80);
                     };
-                    window.onafterprint = function () { window.close(); };
+                    window.onafterprint = function () { if (window.name !== 'app-print-iframe') window.close(); };
                 </script>
             </body>
             </html>
         `;
 
-        const printWindow = window.open('', '_blank', 'width=1024,height=768');
-        if (!printWindow) {
-            this.showNotification('Không mở được cửa sổ in. Vui lòng cho phép pop-up và thử lại.', 'error');
-            return;
-        }
-        printWindow.document.write(printHtml);
-        printWindow.document.close();
+        this.executePrintDocument(printHtml, 'Đang mở sổ thuế để in');
     }
 
     exportTaxDeclarationPdf() {
@@ -10460,9 +10492,7 @@ class HamobileBanhang {
             </div>
         `;
 
-        // Mở cửa sổ mới và in báo cáo
-        const printWindow = window.open('', '_blank', 'width=800,height=600');
-        printWindow.document.write(`
+        const reportHtml = `
             <!DOCTYPE html>
             <html dir="ltr" lang="vi">
             <head>
@@ -10490,15 +10520,13 @@ class HamobileBanhang {
             <body>
                 <div style="padding: 20px; margin-bottom: 20px;" class="no-print">
                     <button onclick="window.print()" style="background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; margin-right: 10px;">🖨️ In báo cáo</button>
-                    <button onclick="window.close()" style="background: #6b7280; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">❌ Đóng</button>
+                    <button onclick="if(window.name!=='app-print-iframe')window.close()" style="background: #6b7280; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">❌ Đóng</button>
                 </div>
                 ${reportContent}
             </body>
             </html>
-        `);
-        printWindow.document.close();
-
-        this.showNotification(`Đã xuất báo cáo cho khách hàng ${customerName}`, 'success');
+        `;
+        this.executePrintDocument(reportHtml, `Đã xuất báo cáo cho khách hàng ${customerName}`);
     }
 
     backupProductsToExcel() {
@@ -14759,12 +14787,7 @@ class HamobileBanhang {
                 .code { text-align: center; font-size: ${labelH <= 12 ? '6pt' : '7pt'}; color: #4b5563; font-family: monospace; }
             `;
         }
-        const win = window.open('', '_blank', 'width=900,height=700');
-        if (!win) {
-            this.showNotification('Trình duyệt đang chặn popup in tem.', 'warning');
-            return;
-        }
-        win.document.write(`
+        const labelPrintHtml = `
             <html dir="ltr" lang="vi">
             <head>
                 <meta charset="UTF-8">
@@ -14774,16 +14797,14 @@ class HamobileBanhang {
             <body>
                 ${printBody}
                 <script>
-                    window.onafterprint = function() { window.close(); };
-                    window.addEventListener('focus', function () { setTimeout(function () { window.close(); }, 200); });
+                    window.onafterprint = function() { if (window.name !== 'app-print-iframe') window.close(); };
+                    window.addEventListener('focus', function () { setTimeout(function () { if (window.name !== 'app-print-iframe') window.close(); }, 200); });
                     setTimeout(function() { window.print(); }, 120);
                 </script>
             </body>
             </html>
-        `);
-        win.document.close();
-        win.focus();
-        this.showNotification(`Đang in ${labels.length} tem theo số lượng tồn của ${products.length} sản phẩm đã chọn.`, 'success');
+        `;
+        this.executePrintDocument(labelPrintHtml, `Đang in ${labels.length} tem theo số lượng tồn của ${products.length} sản phẩm đã chọn.`);
     }
 
     printProductLabels(productId, forcedTemplateId, forcedPrintType, forcedItems) {
@@ -14951,12 +14972,7 @@ class HamobileBanhang {
                 .code { text-align: center; font-size: ${labelH <= 12 ? '6pt' : '7pt'}; color: #4b5563; font-family: monospace; }
             `;
         }
-        const win = window.open('', '_blank', 'width=900,height=700');
-        if (!win) {
-            this.showNotification('Trình duyệt đang chặn popup in tem.', 'warning');
-            return;
-        }
-        win.document.write(`
+        const labelPrintHtml = `
             <html dir="ltr" lang="vi">
             <head>
                 <meta charset="UTF-8">
@@ -14968,17 +14984,16 @@ class HamobileBanhang {
             <body>
                 ${printBody}
                 <script>
-                    window.onafterprint = function() { window.close(); };
+                    window.onafterprint = function() { if (window.name !== 'app-print-iframe') window.close(); };
                     window.addEventListener('focus', function () {
-                        setTimeout(function () { window.close(); }, 200);
+                        setTimeout(function () { if (window.name !== 'app-print-iframe') window.close(); }, 200);
                     });
                     setTimeout(function() { window.print(); }, 120);
                 </script>
             </body>
             </html>
-        `);
-        win.document.close();
-        win.focus();
+        `;
+        this.executePrintDocument(labelPrintHtml, `Đang in tem mã ${product.name || product.id}`);
     }
 
     // Payment and Debt Management
@@ -15989,12 +16004,6 @@ class HamobileBanhang {
         const debtAfterStr = payment.debtAfter != null ? payment.debtAfter.toLocaleString('vi-VN') + ' VNĐ' : '-';
         const amountStr = (payment.amount || 0).toLocaleString('vi-VN') + ' VNĐ';
 
-        const printWin = window.open('', '_blank', 'width=420,height=650');
-        if (!printWin) {
-            this.showNotification('Trình duyệt chặn cửa sổ popup in. Vui lòng bỏ chặn popup!', 'warning');
-            return;
-        }
-
         const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -16052,14 +16061,12 @@ class HamobileBanhang {
     <script>
         window.onload = function() {
             window.print();
-            setTimeout(function() { window.close(); }, 800);
+            setTimeout(function() { if (window.name !== 'app-print-iframe') window.close(); }, 800);
         };
     </script>
 </body>
 </html>`;
-        printWin.document.open();
-        printWin.document.write(html);
-        printWin.document.close();
+        this.executePrintDocument(html, 'Đang mở phiếu thu nợ để in');
     }
 
     exportDebtReport(mode = null) {
@@ -18993,15 +19000,7 @@ class HamobileBanhang {
             console.log('Logo data:', companySettings.logo ? 'Found' : 'Not found');
             console.log('QR data:', companySettings.qrCode ? 'Found' : 'Not found');
 
-            // Professional invoice window
-            const invoiceWindow = window.open('', '_blank', 'width=800,height=900');
-
-            if (!invoiceWindow) {
-                this.showNotification('❌ Popup bị chặn! Hãy cho phép popup.', 'error');
-                return;
-            }
-
-            invoiceWindow.document.write(`
+            const invoiceHtml = `
                 <!DOCTYPE html>
                 <html dir="ltr" lang="vi">
                 <head>
@@ -19258,7 +19257,7 @@ class HamobileBanhang {
                         <!-- Print Buttons -->
                         <div class="print-buttons no-print">
                             <button class="btn btn-print" onclick="window.print()">🖨️ In hóa đơn</button>
-                            <button class="btn btn-close" onclick="window.close()">❌ Đóng</button>
+                            <button class="btn btn-close" onclick="if(window.name!=='app-print-iframe')window.close()">❌ Đóng</button>
                         </div>
 
                         <!-- Footer -->
@@ -19268,12 +19267,8 @@ class HamobileBanhang {
                     </div>
                 </body>
                 </html>
-            `);
-
-            invoiceWindow.document.close();
-            invoiceWindow.focus();
-
-            this.showNotification(`✅ Đã mở hóa đơn chuyên nghiệp ${order.id}`, 'success');
+            `;
+            this.executePrintDocument(invoiceHtml, `Đã mở hóa đơn chuyên nghiệp ${order.id}`);
 
         } catch (error) {
             console.error('Lỗi in hóa đơn:', error);
@@ -19419,15 +19414,7 @@ class HamobileBanhang {
             const popup = document.querySelector('div[style*="fixed"]');
             if (popup) popup.remove();
 
-            // Professional invoice window with VAT
-            const invoiceWindow = window.open('', '_blank', 'width=800,height=900');
-
-            if (!invoiceWindow) {
-                this.showNotification('❌ Popup bị chặn! Hãy cho phép popup.', 'error');
-                return;
-            }
-
-            invoiceWindow.document.write(`
+            const invoiceVatHtml = `
                 <!DOCTYPE html>
                 <html dir="ltr" lang="vi">
                 <head>
@@ -19629,7 +19616,7 @@ class HamobileBanhang {
                         <!-- Print Buttons -->
                         <div class="print-buttons no-print">
                             <button class="btn btn-print" onclick="window.print()">🖨️ In hóa đơn VAT</button>
-                            <button class="btn btn-close" onclick="window.close()">❌ Đóng</button>
+                            <button class="btn btn-close" onclick="if(window.name!=='app-print-iframe')window.close()">❌ Đóng</button>
                         </div>
 
                         <!-- Footer -->
@@ -19639,12 +19626,8 @@ class HamobileBanhang {
                     </div>
                 </body>
                 </html>
-            `);
-
-            invoiceWindow.document.close();
-            invoiceWindow.focus();
-
-            this.showNotification(`✅ Đã mở hóa đơn VAT ${vatRate}% cho đơn hàng ${order.id}`, 'success');
+            `;
+            this.executePrintDocument(invoiceVatHtml, `Đã mở hóa đơn VAT ${vatRate}% cho đơn hàng ${order.id}`);
 
         } catch (error) {
             console.error('Lỗi in hóa đơn VAT:', error);
@@ -19744,8 +19727,7 @@ class HamobileBanhang {
             const orderCount = orderRows.length;
             const repairCount = repairRows.length;
 
-            const reportWindow = window.open('', '_blank');
-            reportWindow.document.write(`
+            const reportHtml = `
                 <!DOCTYPE html>
                 <html dir="ltr" lang="vi">
                 <head>
@@ -20098,7 +20080,7 @@ class HamobileBanhang {
 
                         <div class="print-buttons no-print">
                             <button class="btn btn-print" onclick="window.print()">🖨️ In báo cáo công nợ</button>
-                            <button class="btn btn-close" onclick="window.close()">❌ Đóng</button>
+                            <button class="btn btn-close" onclick="if(window.name!=='app-print-iframe')window.close()">❌ Đóng</button>
                         </div>
 
                         <div class="footer-info">
@@ -20107,12 +20089,8 @@ class HamobileBanhang {
                     </div>
                 </body>
                 </html>
-            `);
-
-            reportWindow.document.close();
-            reportWindow.focus();
-
-            this.showNotification(`✅ Đã tạo báo cáo công nợ cho khách hàng ${customer.name} (${debtRows.length} khoản nợ)`, 'success');
+            `;
+            this.executePrintDocument(reportHtml, `Đã tạo báo cáo công nợ cho khách hàng ${customer.name} (${debtRows.length} khoản nợ)`);
 
         } catch (error) {
             console.error('Lỗi tạo báo cáo công nợ:', error);
