@@ -1345,6 +1345,22 @@ class HamobileBanhang {
             this.startAutoBackup();
         }
         if (window.FirebaseStorage.getConfig()) this.updatePendingSyncIndicator(window.FirebaseStorage.hasPendingSync());
+        // Tự động ngầm nạp lại dữ liệu từ Cloud nếu bộ nhớ tạm rỗng hoặc chỉ có dữ liệu mẫu
+        if (window.FirebaseStorage && typeof window.FirebaseStorage.load === 'function') {
+            setTimeout(async () => {
+                try {
+                    const currentProds = (this.demoData && Array.isArray(this.demoData.products)) ? this.demoData.products.length : 0;
+                    if (currentProds <= 10) {
+                        const cloudPkg = await window.FirebaseStorage.load();
+                        if (cloudPkg && cloudPkg.data && Array.isArray(cloudPkg.data.products) && cloudPkg.data.products.length > currentProds) {
+                            this.demoData = cloudPkg.data;
+                            if (typeof this.saveToLocalStorage === 'function') this.saveToLocalStorage();
+                            this.loadPage(this.currentPage || 'dashboard');
+                        }
+                    }
+                } catch (_) { }
+            }, 300);
+        }
     }
     startAutoSync() {
         if (!window.FirebaseStorage.getConfig()) return;
