@@ -12,68 +12,13 @@
 
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="responsive-md.css">
-    <link rel="stylesheet" href="license-gate.css">
-    <!-- OFFLINE MODE: không dùng Firebase / cloud -->
-    <script>window.FIREBASE_CONFIG = { url: 'offline', key: 'local' }; window._offlineMode = true;</script>
-
-    <!-- Popup-to-iframe fallback: fix window.open() bị chặn trong Tauri WebView -->
+    <script>window.FIREBASE_CONFIG = window.FIREBASE_CONFIG || { url: '', key: '' };</script>
     <script>
-    (function () {
-        var _nativeOpen = window.open.bind(window);
-        window.open = function (url, name, specs) {
-            var popup = _nativeOpen(url || '', name || '_blank', specs || '');
-            if (popup) return popup;
-
-            // Popup bị chặn — dùng iframe overlay thay thế
-            var collected = '';
-            var iframe = null;
-
-            var fakeWin = {
-                closed: false,
-                name: name || '_blank',
-                location: { href: url || '' },
-                onafterprint: null,
-                document: {
-                    write: function (s) { collected += s; },
-                    writeln: function (s) { collected += s + '\n'; },
-                    close: function () {
-                        iframe = document.createElement('iframe');
-                        iframe.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483647;border:none;background:#fff;';
-                        document.body.appendChild(iframe);
-
-                        // Override close/print trong iframe TRƯỚC khi write để script bên trong thấy
-                        var iw = iframe.contentWindow;
-                        iw.close = function () {
-                            if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
-                            fakeWin.closed = true;
-                        };
-
-                        var iDoc = iframe.contentDocument;
-                        iDoc.open();
-                        iDoc.write(collected);
-                        iDoc.close();
-
-                        // Gán lại sau write (một số trình duyệt reset window object sau document.write)
-                        iw = iframe.contentWindow;
-                        iw.close = function () {
-                            if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
-                            fakeWin.closed = true;
-                        };
-                    }
-                },
-                print: function () {
-                    if (iframe) iframe.contentWindow.print();
-                },
-                close: function () {
-                    if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
-                    this.closed = true;
-                },
-                focus: function () {},
-                blur: function () {}
-            };
-            return fakeWin;
-        };
-    })();
+        (function() {
+            var s = document.createElement('script');
+            s.src = 'firebase-config.js' + (window.location.search || '');
+            document.head.appendChild(s);
+        })();
     </script>
 </head>
 <body>
@@ -143,50 +88,13 @@
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; max-width: 1200px; margin: 0 auto;">
             <span style="font-size: 22px;">ℹ️</span>
             <div style="flex: 1; min-width: 200px;" id="incognito-warning-text">
-                <strong>Chế độ offline</strong> — Dữ liệu lưu trên máy tính này. Nhớ sao lưu file định kỳ để tránh mất dữ liệu khi xóa cache trình duyệt.
+                <strong>Thông báo từ ứng dụng</strong> — Trình duyệt có thể chặn lưu tạm. Không phải trang lạ. Nên bật đồng bộ đám mây: Cài đặt trong app → mục sao lưu / đồng bộ đám mây.
             </div>
             <button type="button" onclick="if(window.app){app.manualBackup();app.hideIncognitoWarning();}" style="background: white; color: #047857; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 700; cursor: pointer; white-space: nowrap;">📥 Sao lưu file</button>
             <button type="button" onclick="if(window.app)app.hideIncognitoWarning()" style="background: rgba(255,255,255,0.25); color: white; border: 1px solid rgba(255,255,255,0.55); padding: 10px 16px; border-radius: 8px; cursor: pointer;">Đóng</button>
         </div>
     </div>
 
-    <!-- ═══════════════════════════════════════════════════════════════════
-         LICENSE GATE OVERLAY — shown before app loads; hidden when valid
-         ═══════════════════════════════════════════════════════════════════ -->
-    <div id="license-gate">
-        <!-- Loading state -->
-        <div id="lg-loading">
-            <div id="lg-spinner"></div>
-            <p>Đang kiểm tra bản quyền…</p>
-        </div>
-
-        <!-- Activation / info card (hidden until license check returns) -->
-        <div id="lg-card">
-            <div class="lg-titlebar">
-                <div class="lg-titlebar-icon">🛒</div>
-                <div class="lg-titlebar-text">
-                    <h1>HangHoa POS</h1>
-                    <p id="lg-subtitle">Registration Dialog</p>
-                </div>
-            </div>
-            <div id="lg-content"></div>
-        </div>
-
-        <div id="lg-success-modal" role="dialog" aria-modal="true" aria-labelledby="lg-success-title">
-            <div class="lg-modal-box">
-                <div class="lg-modal-titlebar" id="lg-success-title">Kích hoạt thành công</div>
-                <div class="lg-modal-body">
-                    <div class="lg-modal-icon" aria-hidden="true">i</div>
-                    <p class="lg-modal-text" id="lg-success-text">Cảm ơn bạn đã đăng ký bản quyền!</p>
-                </div>
-                <div class="lg-modal-actions">
-                    <button type="button" class="lg-btn lg-btn-primary" id="lg-success-ok">OK</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script src="license-gate.js"></script>
     <script src="virtual-scroll-grid.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.min.js"></script>
     <script src="app-errors.js"></script>
