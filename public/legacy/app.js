@@ -5923,24 +5923,22 @@ class HamobileBanhang {
                             <table id="orders-table" style="width: 100%; border-collapse: collapse; background: white; table-layout: fixed; min-width: 960px;">
                                 <colgroup>
                                     <col style="width: 3.5%;">
-                                    <col style="width: 14%;">
-                                    <col style="width: 10%;">
-                                    <col style="width: 7.5%;">
-                                    <col style="width: 8%;">
-                                    <col style="width: 20%;">
+                                    <col style="width: 15%;">
+                                    <col style="width: 12%;">
+                                    <col style="width: 14.5%;">
+                                    <col style="width: 23%;">
                                     <col style="width: 10%;">
                                     <col style="width: 9.5%;">
                                     <col style="width: 6.5%;">
-                                    <col style="width: 5.5%;">
-                                    <col style="width: 5.5%;">
+                                    <col style="width: 6%;">
+                                    <col style="width: 6%;">
                                 </colgroup>
                                 <thead>
                                     <tr style="background: #f8fafc;">
                                         <th style="padding: 10px 6px; text-align: center; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;"><input type="checkbox" id="orders-select-all" ${selectAllChecked ? 'checked' : ''} onchange="app.toggleOrdersSelectAll(this.checked)" style="width: 18px; height: 18px; cursor: pointer;" title="Chọn tất cả"></th>
                                         <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Mã đơn</th>
                                         <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Khách hàng</th>
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">SĐT</th>
-                                        <th class="orders-col-address" style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Địa chỉ</th>
+                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;" title="Thông tin liên hệ (SĐT & Địa chỉ)">TTKH</th>
                                         <th class="orders-col-products" style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Sản phẩm</th>
                                         <th class="orders-col-time" style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Thời gian</th>
                                         <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Tổng tiền</th>
@@ -5960,48 +5958,7 @@ class HamobileBanhang {
         `;
     }
     getOrderTableRowsHtml(filtered, orders) {
-        if (!filtered || filtered.length === 0) return '<tr><td colspan="11" style="padding: 24px; text-align: center; color: #6b7280;">Chưa có đơn hàng nào.</td></tr>';
-        return filtered.map((order, idx) => {
-            const originalIndex = orders.findIndex(o => o.id === order.id);
-            const checked = this.selectedOrderIds.has(order.id);
-            const productsStr = (order.products || []).map(p => (p.name || p.productName || '-') + ' x' + (p.quantity || 1)).join(', ') || '-';
-            const isCancelled = !this.isOrderFinalizedForRevenue(order);
-            const rowBg = isCancelled ? '#fef2f2' : (idx % 2 === 0 ? '#fafbfc' : 'white');
-            const cancelBadge = isCancelled
-                ? `<span style="display:inline-block; margin-left:6px; padding:2px 6px; border-radius:999px; background:#ef4444; color:#fff; font-size:10px; font-weight:700;">ĐÃ HỦY</span>`
-                : '';
-            const imeiBadge = order.imei ? `<div style="font-size:11px; color:#059669; font-weight:600; margin-top:2px; display:flex; align-items:center; gap:3px;">📱 <span>${escapeHtml(order.imei)}</span></div>` : '';
-            const wInfo = this.getWarrantyStatusInfo(order);
-            const warrantyBadge = wInfo ? wInfo.badge : '';
-            return `<tr data-order-index="${originalIndex}" style="background: ${rowBg}; border-bottom: 1px solid #f1f5f9;">
-                <td data-label="Chọn" style="padding: 10px 6px; border-bottom: 1px solid #e5e7eb; text-align: center; vertical-align: middle;"><input type="checkbox" data-order-id="${escapeHtml(order.id || '')}" ${checked ? 'checked' : ''} onchange="app.toggleOrderSelect(this.getAttribute('data-order-id'), this.checked)" style="width: 18px; height: 18px; cursor: pointer;"></td>
-                <td data-label="Mã đơn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600; vertical-align: top;">
-                    <div style="display:flex; align-items:center; gap:4px; font-size:13px; color:#0f172a;">
-                        <span>${order.id}</span>
-                        ${cancelBadge}
-                    </div>
-                    ${imeiBadge}
-                    ${warrantyBadge}
-                </td>
-                <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">${escapeHtml(order.customerName || '-')}</td>
-                <td data-label="SĐT" class="orders-col-phone" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">${escapeHtml(order.phone || '-')}</td>
-                <td data-label="Địa chỉ" class="orders-col-address" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; vertical-align: top;" title="${escapeHtml(order.address || '')}">${escapeHtml(order.address || '-')}</td>
-                <td data-label="Sản phẩm" class="orders-col-products" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.4; white-space: normal; word-break: normal; overflow-wrap: break-word; vertical-align: top;" title="${escapeHtml(productsStr)}"><div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;">${escapeHtml(productsStr.length > 90 ? productsStr.substring(0, 90) + '…' : productsStr)}</div></td>
-                <td data-label="Thời gian" class="orders-col-time" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; white-space: nowrap;">${order.date || ''}<br><span style="font-size:11px; color:#64748b;">${order.time || ''}</span></td>
-                <td data-label="Tổng tiền" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 700; color: #0f172a; vertical-align: top; white-space: nowrap;">${(order.total || 0).toLocaleString('vi-VN')} VNĐ</td>
-                <td data-label="Thanh toán" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">${escapeHtml(order.paymentMethod || '-')}</td>
-                <td data-label="TT nhanh" class="payment-cell orders-col-payment-status" style="padding: 10px 4px; border-bottom: 1px solid #e5e7eb; text-align: center; vertical-align: top;">
-                    <button ondblclick="app.togglePaymentStatus(${originalIndex})" ${!this.isOrderFinalizedForRevenue(order) ? 'disabled' : ''} style="background: ${!this.isOrderFinalizedForRevenue(order) ? '#94a3b8' : (order.paymentStatus === 'Đã thanh toán' ? '#22c55e' : '#f59e0b')}; color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: ${!this.isOrderFinalizedForRevenue(order) ? 'not-allowed' : 'pointer'}; font-size: 11px; font-weight: 600; white-space: nowrap;" title="${!this.isOrderFinalizedForRevenue(order) ? 'Đơn đã hủy - không đổi thanh toán' : 'Double click để đổi trạng thái thanh toán'}">${order.paymentStatus === 'Đã thanh toán' ? '✓ Đã TT' : 'Công nợ'}</button>
-                </td>
-                <td data-label="Thao tác" class="orders-col-actions" style="padding: 10px 6px; border-bottom: 1px solid #e5e7eb; white-space: normal; text-align:left; vertical-align: top;">
-                    <button type="button"
-                        onclick="app.viewOrderDetails(${originalIndex})"
-                        style="background: var(--primary-blue); color: white; border: none; padding: 5px 9px; border-radius: 6px; cursor: pointer; font-size: 11px; white-space: nowrap; font-weight: 700;">
-            </tr>`;
-        }).join('');
-    }
-    getOrderTableRowsHtml(filtered, orders) {
-        if (!filtered || filtered.length === 0) return '<tr><td colspan="11" style="padding: 24px; text-align: center; color: #6b7280;">Chưa có đơn hàng nào.</td></tr>';
+        if (!filtered || filtered.length === 0) return '<tr><td colspan="10" style="padding: 24px; text-align: center; color: #6b7280;">Chưa có đơn hàng nào.</td></tr>';
         return filtered.map((order, idx) => {
             const originalIndex = orders.findIndex(o => o.id === order.id);
             const checked = this.selectedOrderIds.has(order.id);
@@ -6017,20 +5974,22 @@ class HamobileBanhang {
             return `<tr data-order-index="${originalIndex}" style="background: ${rowBg};">
                 <td data-label="Chọn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: middle;"><input type="checkbox" data-order-id="${escapeHtml(order.id || '')}" ${checked ? 'checked' : ''} onchange="app.toggleOrderSelect(this.getAttribute('data-order-id'), this.checked)" style="width: 18px; height: 18px; cursor: pointer;"></td>
                 <td data-label="Mã đơn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600;">${order.id}${cancelBadge}${imeiBadge}${warrantyBadge}</td>
-                <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${escapeHtml(order.customerName || '-')}</td>
-                <td data-label="SĐT" class="orders-col-phone" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${escapeHtml(order.phone || '-')}</td>
-                <td data-label="Địa chỉ" class="orders-col-address" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;" title="${escapeHtml(order.address || '')}">${escapeHtml(order.address || '-')}</td>
-                <td data-label="Sản phẩm" class="orders-col-products" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.35; white-space: normal; word-break: normal; overflow-wrap: break-word;" title="${escapeHtml(productsStr)}"><div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;">${escapeHtml(productsStr.length > 80 ? productsStr.substring(0, 80) + '…' : productsStr)}</div></td>
-                <td data-label="Thời gian" class="orders-col-time" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${order.date || ''} ${order.time || ''}</td>
-                <td data-label="Tổng tiền" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600;">${(order.total || 0).toLocaleString('vi-VN')} VNĐ</td>
-                <td data-label="Thanh toán" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${escapeHtml(order.paymentMethod || '-')}</td>
-                <td data-label="TT nhanh" class="payment-cell orders-col-payment-status" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">
+                <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; font-weight: 500;">${escapeHtml(order.customerName || '-')}</td>
+                <td data-label="TTKH" class="orders-col-ttkh" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">
+                    <div style="font-size: 13px; color: #0f172a; font-weight: 500;">${escapeHtml(order.phone || '-')}</div>
+                    <div style="font-size: 11px; color: #64748b; margin-top: 2px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(order.address || '')}">${escapeHtml(order.address || '-')}</div>
+                </td>
+                <td data-label="Sản phẩm" class="orders-col-products" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.4; white-space: normal; word-break: normal; overflow-wrap: break-word; vertical-align: top;" title="${escapeHtml(productsStr)}"><div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;">${escapeHtml(productsStr.length > 90 ? productsStr.substring(0, 90) + '…' : productsStr)}</div></td>
+                <td data-label="Thời gian" class="orders-col-time" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; white-space: nowrap;">${order.date || ''}<br><span style="font-size:11px; color:#64748b;">${order.time || ''}</span></td>
+                <td data-label="Tổng tiền" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 700; color: #0f172a; vertical-align: top; white-space: nowrap;">${(order.total || 0).toLocaleString('vi-VN')} VNĐ</td>
+                <td data-label="Thanh toán" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">${escapeHtml(order.paymentMethod || '-')}</td>
+                <td data-label="TT nhanh" class="payment-cell orders-col-payment-status" style="padding: 10px 4px; border-bottom: 1px solid #e5e7eb; text-align: center; vertical-align: top;">
                     <button ondblclick="app.togglePaymentStatus(${originalIndex})" ${!this.isOrderFinalizedForRevenue(order) ? 'disabled' : ''} style="background: ${!this.isOrderFinalizedForRevenue(order) ? '#94a3b8' : (order.paymentStatus === 'Đã thanh toán' ? '#22c55e' : '#f59e0b')}; color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: ${!this.isOrderFinalizedForRevenue(order) ? 'not-allowed' : 'pointer'}; font-size: 11px; font-weight: 600; white-space: nowrap;" title="${!this.isOrderFinalizedForRevenue(order) ? 'Đơn đã hủy - không đổi thanh toán' : 'Double click để đổi trạng thái thanh toán'}">${order.paymentStatus === 'Đã thanh toán' ? '✓ Đã TT' : 'Công nợ'}</button>
                 </td>
-                <td data-label="Thao tác" class="orders-col-actions" style="padding: 8px 6px; border-bottom: 1px solid #e5e7eb; white-space: normal; text-align:left;">
+                <td data-label="Thao tác" class="orders-col-actions" style="padding: 10px 6px; border-bottom: 1px solid #e5e7eb; white-space: normal; text-align:center; vertical-align: top;">
                     <button type="button"
                         onclick="app.viewOrderDetails(${originalIndex})"
-                        style="background: var(--primary-blue); color: white; border: none; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 10px; white-space: nowrap; font-weight: 700;">
+                        style="background: var(--primary-blue); color: white; border: none; padding: 5px 9px; border-radius: 6px; cursor: pointer; font-size: 11px; white-space: nowrap; font-weight: 700;">
                         Chi tiết
                     </button>
                 </td>
