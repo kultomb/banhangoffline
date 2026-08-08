@@ -11556,12 +11556,11 @@ class HamobileBanhang {
                             var link = document.createElement('a');
                             link.href = url;
                             var vietnamTime = app.getVietnamTime();
-                            link.download =
-                                'Hangho_com_backup_' +
-                                vietnamTime.toISOString().split('T')[0] +
-                                '_' +
-                                vietnamTime.toTimeString().split(' ')[0].replace(/:/g, '') +
-                                '.json';
+                            var cfgKey = window.FirebaseStorage.getConfig && window.FirebaseStorage.getConfig() ? window.FirebaseStorage.getConfig().key : '';
+                            var shopSlug = (cfgKey || '').replace(/^shop_/, '') || 'hangho';
+                            var dateStr = vietnamTime.toISOString().split('T')[0];
+                            var timeStr = vietnamTime.toTimeString().split(' ')[0].replace(/:/g, '');
+                            link.download = 'Backup_Shop_' + shopSlug + '_' + dateStr + '_' + timeStr + '.json';
                             document.body.appendChild(link);
                             link.click();
                             document.body.removeChild(link);
