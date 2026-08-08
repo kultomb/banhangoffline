@@ -6347,10 +6347,10 @@ class HamobileBanhang {
                     <div style="font-size: 13px; color: #0f172a;">${r.id || 'SC' + String(index + 1).padStart(4, '0')}</div>
                     ${r.imei ? `<div style="font-size: 11px; color: #059669; font-weight: 600; margin-top: 2px;">📱 ${escapeHtml(r.imei)}</div>` : ''}
                 </td>
-                <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; font-weight: 500;">${escapeHtml(r.customerName || '-')}</td>
                 <td data-label="TTKH" class="repairs-col-ttkh" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">
-                    <div style="font-size: 13px; color: #0f172a; font-weight: 500;">${escapeHtml(r.phone || '-')}</div>
-                    ${r.deviceName ? `<div style="font-size: 11px; color: #64748b; margin-top: 2px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.deviceName)}">📱 ${escapeHtml(r.deviceName)}</div>` : ''}
+                    <div style="font-size: 13px; color: #0f172a; font-weight: 600;">${escapeHtml(r.customerName || '-')}</div>
+                    <div style="font-size: 11px; color: #64748b; margin-top: 2px;">${escapeHtml(r.phone || '-')}</div>
+                    ${r.deviceName ? `<div style="font-size: 11px; color: #059669; font-weight: 500; margin-top: 1px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.deviceName)}">📱 ${escapeHtml(r.deviceName)}</div>` : ''}
                 </td>
                 <td data-label="Bản chất sửa chữa" class="repairs-col-desc" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.4; white-space: normal; word-break: normal; overflow-wrap: break-word; vertical-align: top;" title="${desc.replace(/"/g, '&quot;')}">
                     <div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: #0f172a; font-weight: 500;">${escapeHtml(descShort)}</div>
@@ -6404,21 +6404,19 @@ class HamobileBanhang {
                         <div style="overflow-x: auto;">
                             <table id="repairs-table" style="width: 100%; min-width: 980px; border-collapse: collapse; background: white; table-layout: fixed;">
                                 <colgroup>
-                                    <col style="width: 8.5%;">
-                                    <col style="width: 11.5%;">
-                                    <col style="width: 13%;">
-                                    <col style="width: 25.5%;">
+                                    <col style="width: 9.5%;">
+                                    <col style="width: 15.5%;">
+                                    <col style="width: 27.5%;">
                                     <col style="width: 9.5%;">
                                     <col style="width: 10.5%;">
-                                    <col style="width: 7.5%;">
-                                    <col style="width: 7.5%;">
-                                    <col style="width: 6.5%;">
+                                    <col style="width: 8.5%;">
+                                    <col style="width: 8.5%;">
+                                    <col style="width: 10.5%;">
                                 </colgroup>
                                 <thead>
                                     <tr style="background: #f8fafc; border-bottom: 2px solid #e5e7eb;">
                                         <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Mã phiếu</th>
-                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Khách hàng</th>
-                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;" title="Thông tin liên hệ (SĐT & Thiết bị)">TTKH</th>
+                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;" title="Thông tin khách hàng (Tên, SĐT & Thiết bị)">TTKH</th>
                                         <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Bản chất sửa chữa</th>
                                         <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Thời gian</th>
                                         <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Chi phí</th>
