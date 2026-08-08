@@ -11450,25 +11450,52 @@ class HamobileBanhang {
         const btn = document.getElementById('btn-force-cloud-refresh');
         if (btn) {
             btn.disabled = true;
-            btn.innerHTML = '<span>🔄</span> Đang nạp dữ liệu từ Cloud...';
+            btn.innerHTML = '<span>🔄</span> Đang kéo dữ liệu từ Server...';
         }
 
         try {
-            this.showNotification('Đang nạp dữ liệu mới nhất từ Đám mây...', 'info');
-            const loaded = await window.FirebaseStorage.load();
-            if (loaded && loaded.data && Array.isArray(loaded.data.products)) {
-                this.demoData = loaded.data;
+            this.showNotification('Đang kết nối Server tải dữ liệu...', 'info');
+
+            // Lấy shop slug từ URL hoặc config
+            const urlParams = new URLSearchParams(window.location.search);
+            let shopSlug = urlParams.get('shop') || (window.location.pathname.replace(/^\/+/, '').split('/')[0]);
+            if (shopSlug === 'legacy' || shopSlug === 'dashboard' || !shopSlug) {
+                const cfgKey = window.FirebaseStorage.getConfig && window.FirebaseStorage.getConfig() ? window.FirebaseStorage.getConfig().key : '';
+                shopSlug = cfgKey ? cfgKey.replace(/^shop_/, '') : '';
+            }
+
+            // Gọi trực tiếp API Server Proxy bằng fetch bypass cache 100%
+            const fetchUrl = '/api/rtdb/backups/' + (shopSlug ? 'shop_' + shopSlug : 'app') + '/app?t=' + Date.now();
+            const res = await fetch(fetchUrl, {
+                method: 'GET',
+                headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' }
+            });
+
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const json = await res.json();
+
+            let payloadData = null;
+            if (json && json.data && Array.isArray(json.data.products)) {
+                payloadData = json.data;
+            } else if (json && Array.isArray(json.products)) {
+                payloadData = json;
+            }
+
+            if (payloadData && Array.isArray(payloadData.products) && payloadData.products.length > 0) {
+                this.demoData = payloadData;
+                window.FirebaseStorage.setData(this.demoData);
                 if (typeof this.saveToLocalStorage === 'function') this.saveToLocalStorage();
-                const prodCount = (loaded.data.products || []).length;
-                const orderCount = (loaded.data.orders || []).length;
-                this.showNotification(`✅ Đã nạp thành công ${prodCount} sản phẩm và ${orderCount} đơn hàng từ Đám mây.`, 'success');
-                this.loadPage(this.currentPage || 'settings');
+
+                const prodCount = payloadData.products.length;
+                const orderCount = (payloadData.orders || []).length;
+                this.showNotification(`🎉 Khôi phục thành công ${prodCount} sản phẩm và ${orderCount} đơn hàng từ Đám mây!`, 'success');
+                this.loadPage(this.currentPage || 'dashboard');
             } else {
-                this.showNotification('Không tìm thấy dữ liệu trên Đám mây hoặc kết nối bị gián đoạn.', 'warning');
+                this.showNotification('Không tìm thấy bản ghi sản phẩm trên Server.', 'warning');
             }
         } catch (err) {
             console.error('forceRefreshCloudData error:', err);
-            this.showNotification('Lỗi nạp dữ liệu từ Đám mây. Vui lòng thử lại.', 'error');
+            this.showNotification('Lỗi nạp dữ liệu từ Server: ' + (err.message || 'Kết nối gián đoạn'), 'error');
         } finally {
             if (btn) {
                 btn.disabled = false;
