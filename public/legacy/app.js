@@ -827,7 +827,7 @@ class HamobileBanhang {
         this.selectedProductIds = new Set();
         this.selectedSupplierIds = new Set();
         this.selectedOrderIds = new Set();
-        this.posCart = { items: [], customerId: 'KH_LE', customerName: 'Khách lẻ', discount: 0 };
+        this.posCart = { items: [], customerId: 'KH_LE', customerName: 'Khách lẻ', discount: 0, imei: '' };
         this.posMobileStep = 1; // 1: Danh sách SP | 2: Chọn KH + giỏ hàng
         this._posScannerStream = null;
         this._posScannerActive = false;
@@ -4070,6 +4070,13 @@ class HamobileBanhang {
                             </div>
                             <div id="pos-customer-name" style="margin-top: 6px; font-weight: 600; font-size: 13px; color: #1f2937;">${this.posCart.customerName}</div>
                         </div>
+                        <div style="margin-top: 8px;">
+                            <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">📱 Số IMEI / Serial máy (Bảo hành)</div>
+                            <input type="text" id="pos-imei-input" placeholder="Ví dụ: 356981098234123..." 
+                                   value="${escapeHtml(this.posCart.imei || '')}" 
+                                   oninput="app.updatePOSImei(this.value)"
+                                   style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 2px solid #e5e7eb; border-radius: 6px; font-size: 13px;">
+                        </div>
                         <div style="margin-top: 12px; flex-shrink: 0;">
                             <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #e5e7eb; font-size: 13px;"><span>Tổng tiền hàng</span><span id="pos-total-goods">${summary.totalGoods.toLocaleString('vi-VN')}</span></div>
                             <div style="padding: 8px 0; border-bottom: 1px solid #e5e7eb; font-size: 13px;">
@@ -4232,6 +4239,10 @@ class HamobileBanhang {
     updatePOSAmountPaid(val) {
         this.posCart.amountPaid = Math.max(0, this.parsePrice(val));
         this.updatePOSDebtHint();
+    }
+
+    updatePOSImei(val) {
+        this.posCart.imei = val || '';
     }
 
     updatePOSDebtHint() {
@@ -5254,7 +5265,8 @@ class HamobileBanhang {
             notes: '',
             totalGoods: totalGoods,
             discount: discount,
-            stockDeducted: true
+            stockDeducted: true,
+            imei: (this.posCart.imei || '').trim()
         };
         this.demoData.orders = this.demoData.orders || [];
         this.demoData.orders.unshift(newOrder);
@@ -5277,6 +5289,7 @@ class HamobileBanhang {
         this.posCart.amountPaid = null;
         this.posCart.customerId = 'KH_LE';
         this.posCart.customerName = 'Khách lẻ';
+        this.posCart.imei = '';
         // Đơn công nợ: lưu ngay lên Firebase để không mất dữ liệu
         if (orderDebt > 0) {
             this.saveToFirebaseImmediate().then(ok => { if (!ok) this.saveToLocalStorage(); });
@@ -5922,9 +5935,10 @@ class HamobileBanhang {
             const cancelBadge = isCancelled
                 ? `<div style="display:inline-block; margin-left:6px; padding:2px 6px; border-radius:999px; background:#ef4444; color:#fff; font-size:10px; font-weight:700;">ĐÃ HỦY</div>`
                 : '';
+            const imeiBadge = order.imei ? `<div style="font-size:11px; color:#059669; font-weight:600; margin-top:2px;">📱 ${escapeHtml(order.imei)}</div>` : '';
             return `<tr data-order-index="${originalIndex}" style="background: ${rowBg};">
                 <td data-label="Chọn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: middle;"><input type="checkbox" data-order-id="${escapeHtml(order.id || '')}" ${checked ? 'checked' : ''} onchange="app.toggleOrderSelect(this.getAttribute('data-order-id'), this.checked)" style="width: 18px; height: 18px; cursor: pointer;"></td>
-                <td data-label="Mã đơn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600;">${order.id}${cancelBadge}</td>
+                <td data-label="Mã đơn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600;">${order.id}${cancelBadge}${imeiBadge}</td>
                 <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${escapeHtml(order.customerName || '-')}</td>
                 <td data-label="SĐT" class="orders-col-phone" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${escapeHtml(order.phone || '-')}</td>
                 <td data-label="Địa chỉ" class="orders-col-address" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;" title="${escapeHtml(order.address || '')}">${escapeHtml(order.address || '-')}</td>
@@ -18963,6 +18977,12 @@ class HamobileBanhang {
                                     <span class="info-label">Hình thức TT:</span>
                                     <span class="info-value">&nbsp;${order.paymentMethod}</span>
                                 </div>
+                                ${order.imei ? `
+                                <div class="info-row">
+                                    <span class="info-label">Số IMEI/Seri:</span>
+                                    <span class="info-value">&nbsp;<strong>${escapeHtml(order.imei)}</strong></span>
+                                </div>
+                                ` : ''}
                             </div>
                             
                             <div class="customer-info">
