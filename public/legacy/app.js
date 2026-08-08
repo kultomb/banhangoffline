@@ -827,7 +827,7 @@ class HamobileBanhang {
         this.selectedProductIds = new Set();
         this.selectedSupplierIds = new Set();
         this.selectedOrderIds = new Set();
-        this.posCart = { items: [], customerId: 'KH_LE', customerName: 'Khách lẻ', discount: 0, imei: '' };
+        this.posCart = { items: [], customerId: 'KH_LE', customerName: 'Khách lẻ', discount: 0, imei: '', warrantyMonths: 0 };
         this.posMobileStep = 1; // 1: Danh sách SP | 2: Chọn KH + giỏ hàng
         this._posScannerStream = null;
         this._posScannerActive = false;
@@ -4077,6 +4077,19 @@ class HamobileBanhang {
                                    oninput="app.updatePOSImei(this.value)"
                                    style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 2px solid #e5e7eb; border-radius: 6px; font-size: 13px;">
                         </div>
+                        <div style="margin-top: 8px;">
+                            <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">🛡️ Thời hạn Bảo hành</div>
+                            <select id="pos-warranty-select" onchange="app.updatePOSWarrantyMonths(this.value)"
+                                    style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 2px solid #e5e7eb; border-radius: 6px; font-size: 13px; background: white;">
+                                <option value="0" ${Number(this.posCart.warrantyMonths || 0) === 0 ? 'selected' : ''}>Không bảo hành</option>
+                                <option value="1" ${Number(this.posCart.warrantyMonths) === 1 ? 'selected' : ''}>1 Tháng</option>
+                                <option value="3" ${Number(this.posCart.warrantyMonths) === 3 ? 'selected' : ''}>3 Tháng</option>
+                                <option value="6" ${Number(this.posCart.warrantyMonths) === 6 ? 'selected' : ''}>6 Tháng</option>
+                                <option value="12" ${Number(this.posCart.warrantyMonths) === 12 ? 'selected' : ''}>12 Tháng (1 Năm)</option>
+                                <option value="24" ${Number(this.posCart.warrantyMonths) === 24 ? 'selected' : ''}>24 Tháng (2 Năm)</option>
+                                <option value="36" ${Number(this.posCart.warrantyMonths) === 36 ? 'selected' : ''}>36 Tháng (3 Năm)</option>
+                            </select>
+                        </div>
                         <div style="margin-top: 12px; flex-shrink: 0;">
                             <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #e5e7eb; font-size: 13px;"><span>Tổng tiền hàng</span><span id="pos-total-goods">${summary.totalGoods.toLocaleString('vi-VN')}</span></div>
                             <div style="padding: 8px 0; border-bottom: 1px solid #e5e7eb; font-size: 13px;">
@@ -4243,6 +4256,55 @@ class HamobileBanhang {
 
     updatePOSImei(val) {
         this.posCart.imei = val || '';
+    }
+
+    updatePOSWarrantyMonths(val) {
+        this.posCart.warrantyMonths = Math.max(0, parseInt(val, 10) || 0);
+    }
+
+    getWarrantyStatusInfo(order) {
+        if (!order || !order.warrantyMonths || Number(order.warrantyMonths) <= 0) {
+            return null;
+        }
+        const months = Number(order.warrantyMonths);
+        const orderDateStr = (order.date || '').split('T')[0];
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(orderDateStr)) return null;
+
+        const [y, m, d] = orderDateStr.split('-').map(Number);
+        const expireDate = new Date(y, m - 1 + months, d);
+
+        const expY = expireDate.getFullYear();
+        const expM = String(expireDate.getMonth() + 1).padStart(2, '0');
+        const expD = String(expireDate.getDate()).padStart(2, '0');
+        const expireDateFormatted = `${expD}/${expM}/${expY}`;
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const expCompare = new Date(expY, expireDate.getMonth(), expD, 23, 59, 59);
+
+        const diffTime = expCompare.getTime() - today.getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        if (diffDays >= 0) {
+            return {
+                isExpired: false,
+                expireDateFormatted,
+                months,
+                daysLeft: diffDays,
+                text: `🟢 Còn BH (${diffDays} ngày — đến ${expireDateFormatted})`,
+                badge: `<div style="margin-top:2px;"><span style="display:inline-block; padding: 2px 6px; border-radius: 6px; background: #dcfce7; color: #15803d; font-size: 11px; font-weight: 600;">🟢 Còn BH ${diffDays}d (đến ${expireDateFormatted})</span></div>`
+            };
+        } else {
+            const absDays = Math.abs(diffDays);
+            return {
+                isExpired: true,
+                expireDateFormatted,
+                months,
+                daysExpired: absDays,
+                text: `🔴 Hết BH (${absDays} ngày — hết ${expireDateFormatted})`,
+                badge: `<div style="margin-top:2px;"><span style="display:inline-block; padding: 2px 6px; border-radius: 6px; background: #fee2e2; color: #b91c1c; font-size: 11px; font-weight: 600;">🔴 Hết BH (hết ${expireDateFormatted})</span></div>`
+            };
+        }
     }
 
     updatePOSDebtHint() {
@@ -5266,7 +5328,8 @@ class HamobileBanhang {
             totalGoods: totalGoods,
             discount: discount,
             stockDeducted: true,
-            imei: (this.posCart.imei || '').trim()
+            imei: (this.posCart.imei || '').trim(),
+            warrantyMonths: Number(this.posCart.warrantyMonths || 0)
         };
         this.demoData.orders = this.demoData.orders || [];
         this.demoData.orders.unshift(newOrder);
@@ -5290,6 +5353,7 @@ class HamobileBanhang {
         this.posCart.customerId = 'KH_LE';
         this.posCart.customerName = 'Khách lẻ';
         this.posCart.imei = '';
+        this.posCart.warrantyMonths = 0;
         // Đơn công nợ: lưu ngay lên Firebase để không mất dữ liệu
         if (orderDebt > 0) {
             this.saveToFirebaseImmediate().then(ok => { if (!ok) this.saveToLocalStorage(); });
@@ -5936,9 +6000,11 @@ class HamobileBanhang {
                 ? `<div style="display:inline-block; margin-left:6px; padding:2px 6px; border-radius:999px; background:#ef4444; color:#fff; font-size:10px; font-weight:700;">ĐÃ HỦY</div>`
                 : '';
             const imeiBadge = order.imei ? `<div style="font-size:11px; color:#059669; font-weight:600; margin-top:2px;">📱 ${escapeHtml(order.imei)}</div>` : '';
+            const wInfo = this.getWarrantyStatusInfo(order);
+            const warrantyBadge = wInfo ? wInfo.badge : '';
             return `<tr data-order-index="${originalIndex}" style="background: ${rowBg};">
                 <td data-label="Chọn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: middle;"><input type="checkbox" data-order-id="${escapeHtml(order.id || '')}" ${checked ? 'checked' : ''} onchange="app.toggleOrderSelect(this.getAttribute('data-order-id'), this.checked)" style="width: 18px; height: 18px; cursor: pointer;"></td>
-                <td data-label="Mã đơn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600;">${order.id}${cancelBadge}${imeiBadge}</td>
+                <td data-label="Mã đơn" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600;">${order.id}${cancelBadge}${imeiBadge}${warrantyBadge}</td>
                 <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${escapeHtml(order.customerName || '-')}</td>
                 <td data-label="SĐT" class="orders-col-phone" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px;">${escapeHtml(order.phone || '-')}</td>
                 <td data-label="Địa chỉ" class="orders-col-address" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;" title="${escapeHtml(order.address || '')}">${escapeHtml(order.address || '-')}</td>
@@ -18981,6 +19047,12 @@ class HamobileBanhang {
                                 <div class="info-row">
                                     <span class="info-label">Số IMEI/Seri:</span>
                                     <span class="info-value">&nbsp;<strong>${escapeHtml(order.imei)}</strong></span>
+                                </div>
+                                ` : ''}
+                                ${order.warrantyMonths ? `
+                                <div class="info-row">
+                                    <span class="info-label">Thời hạn BH:</span>
+                                    <span class="info-value">&nbsp;<strong>${order.warrantyMonths} tháng</strong> ${this.getWarrantyStatusInfo(order) ? `(Đến ${this.getWarrantyStatusInfo(order).expireDateFormatted})` : ''}</span>
                                 </div>
                                 ` : ''}
                             </div>
