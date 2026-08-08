@@ -4234,17 +4234,52 @@ class HamobileBanhang {
         this.posCart.warrantyMonths = Math.max(0, parseInt(val, 10) || 0);
     }
 
-    getWarrantyStatusInfo(order) {
-        if (!order || !order.warrantyMonths || Number(order.warrantyMonths) <= 0) {
+    getWarrantyStatusInfo(item) {
+        if (!item) return null;
+        let months = Number(item.warrantyMonths || 0);
+        if (!months && item.warrantyPeriod) {
+            const wp = String(item.warrantyPeriod).trim().toLowerCase();
+            if (wp.includes('1 tháng') || wp.includes('1 thang')) months = 1;
+            else if (wp.includes('3 tháng') || wp.includes('3 thang')) months = 3;
+            else if (wp.includes('6 tháng') || wp.includes('6 thang')) months = 6;
+            else if (wp.includes('12 tháng') || wp.includes('1 năm') || wp.includes('1 nam')) months = 12;
+            else if (wp.includes('24 tháng') || wp.includes('2 năm') || wp.includes('2 nam')) months = 24;
+            else {
+                const m = wp.match(/(\d+)\s*(tháng|thang)/);
+                if (m) months = parseInt(m[1], 10);
+                else {
+                    const y = wp.match(/(\d+)\s*(năm|nam)/);
+                    if (y) months = parseInt(y[1], 10) * 12;
+                }
+            }
+        }
+
+        if (!months || months <= 0) {
+            if (item.warrantyPeriod && String(item.warrantyPeriod).trim() && !String(item.warrantyPeriod).includes('Không')) {
+                return {
+                    badge: `<div style="margin-top:4px; font-size:11px; color:#475569; font-weight:500; display:flex; align-items:center; gap:4px; flex-wrap:nowrap;"><span style="font-size:10px;">🛡️</span><span>BH: ${escapeHtml(item.warrantyPeriod)}</span></div>`
+                };
+            }
             return null;
         }
-        const months = Number(order.warrantyMonths);
-        const orderDateStr = (order.date || '').split('T')[0];
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(orderDateStr)) return null;
 
-        const [y, m, d] = orderDateStr.split('-').map(Number);
+        let rawDate = String(item.date || '').split('T')[0].trim();
+        let y, m, d;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+            [y, m, d] = rawDate.split('-').map(Number);
+        } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDate)) {
+            const parts = rawDate.split('/').map(Number);
+            d = parts[0]; m = parts[1]; y = parts[2];
+        } else {
+            if (item.warrantyPeriod && String(item.warrantyPeriod).trim() && !String(item.warrantyPeriod).includes('Không')) {
+                return {
+                    badge: `<div style="margin-top:4px; font-size:11px; color:#475569; font-weight:500; display:flex; align-items:center; gap:4px; flex-wrap:nowrap;"><span style="font-size:10px;">🛡️</span><span>BH: ${escapeHtml(item.warrantyPeriod)}</span></div>`
+                };
+            }
+            return null;
+        }
+
         const expireDate = new Date(y, m - 1 + months, d);
-
         const expY = expireDate.getFullYear();
         const expM = String(expireDate.getMonth() + 1).padStart(2, '0');
         const expD = String(expireDate.getDate()).padStart(2, '0');
@@ -6304,31 +6339,42 @@ class HamobileBanhang {
             const payStatus = (r.status || '') === 'Đã trả' ? (hasDebt ? 'Công nợ' : 'Đã thanh toán') : '-';
             const desc = (r.repairDescription || '').replace(/</g, '&lt;');
             const descShort = desc.length > 35 ? desc.substring(0, 35) + '…' : desc || '-';
+            const wInfo = this.getWarrantyStatusInfo(r);
+            const warrantyBadge = wInfo ? wInfo.badge : '';
             return `
-            <tr data-repair-index="${index}" style="vertical-align: middle;">
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; white-space: nowrap;">${r.id || 'SC' + String(index + 1).padStart(4, '0')}</td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${(r.customerName || '-').replace(/"/g, '&quot;')}">${r.customerName || '-'}</td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; white-space: nowrap;">${escapeHtml(r.phone || '-')}</td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${desc.replace(/"/g, '&quot;')}">${descShort}</td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; white-space: nowrap;">${r.warrantyPeriod || '-'}</td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; white-space: nowrap;">${r.date || '-'}</td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">
-                    <span style="padding: 3px 6px; border-radius: 6px; font-size: 11px; white-space: nowrap; display: inline-block; background: ${payStatus === 'Đã thanh toán' ? '#dcfce7' : payStatus === 'Công nợ' ? '#fef3c7' : '#f3f4f6'}; color: ${payStatus === 'Đã thanh toán' ? '#166534' : payStatus === 'Công nợ' ? '#b45309' : '#6b7280'};">
+            <tr data-repair-index="${index}" style="border-bottom: 1px solid #f1f5f9;">
+                <td data-label="Mã phiếu" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600; vertical-align: top;">
+                    <div style="font-size: 13px; color: #0f172a;">${r.id || 'SC' + String(index + 1).padStart(4, '0')}</div>
+                    ${r.imei ? `<div style="font-size: 11px; color: #059669; font-weight: 600; margin-top: 2px;">📱 ${escapeHtml(r.imei)}</div>` : ''}
+                </td>
+                <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; font-weight: 500;">${escapeHtml(r.customerName || '-')}</td>
+                <td data-label="TTKH" class="repairs-col-ttkh" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">
+                    <div style="font-size: 13px; color: #0f172a; font-weight: 500;">${escapeHtml(r.phone || '-')}</div>
+                    ${r.deviceName ? `<div style="font-size: 11px; color: #64748b; margin-top: 2px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.deviceName)}">📱 ${escapeHtml(r.deviceName)}</div>` : ''}
+                </td>
+                <td data-label="Bản chất sửa chữa" class="repairs-col-desc" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.4; white-space: normal; word-break: normal; overflow-wrap: break-word; vertical-align: top;" title="${desc.replace(/"/g, '&quot;')}">
+                    <div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: #0f172a; font-weight: 500;">${escapeHtml(descShort)}</div>
+                    ${warrantyBadge}
+                </td>
+                <td data-label="Thời gian" class="repairs-col-time" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; white-space: nowrap;">${r.date || '-'}<br><span style="font-size:11px; color:#64748b;">${r.time || ''}</span></td>
+                <td data-label="Chi phí" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 700; color: #0f172a; vertical-align: top; white-space: nowrap;">${cost.toLocaleString('vi-VN')} VNĐ</td>
+                <td data-label="Thanh toán" style="padding: 10px 4px; border-bottom: 1px solid #e5e7eb; text-align: center; vertical-align: top; white-space: nowrap;">
+                    <span style="padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; white-space: nowrap; display: inline-block; background: ${payStatus === 'Đã thanh toán' ? '#dcfce7' : payStatus === 'Công nợ' ? '#fef3c7' : '#f3f4f6'}; color: ${payStatus === 'Đã thanh toán' ? '#166534' : payStatus === 'Công nợ' ? '#b45309' : '#6b7280'};">
                         ${payStatus}
                     </span>
-                    ${payStatus === 'Công nợ' && (r.status || '') === 'Đã trả' ? `<span style="margin-left: 4px; font-size: 10px; color: #6b7280;" title="Vào tab Công nợ để ghi nhận thanh toán">→ Tab Công nợ</span>` : ''}
+                    ${payStatus === 'Công nợ' && (r.status || '') === 'Đã trả' ? `<div style="font-size: 10px; color: #6b7280; margin-top: 2px;" title="Vào tab Công nợ để ghi nhận thanh toán">→ Tab Công nợ</div>` : ''}
                 </td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; text-align: center;">
-                    <span style="padding: 3px 6px; border-radius: 6px; font-size: 11px; white-space: nowrap; display: inline-block; background: ${r.status === 'Hoàn thành' ? '#dcfce7' : r.status === 'Đã trả' ? '#e0e7ff' : '#fef3c7'}; color: ${r.status === 'Hoàn thành' ? '#166534' : r.status === 'Đã trả' ? '#3730a3' : '#b45309'};">
+                <td data-label="Trạng thái" style="padding: 10px 4px; border-bottom: 1px solid #e5e7eb; text-align: center; vertical-align: top; white-space: nowrap;">
+                    <span style="padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; white-space: nowrap; display: inline-block; background: ${r.status === 'Hoàn thành' ? '#dcfce7' : r.status === 'Đã trả' ? '#e0e7ff' : '#fef3c7'}; color: ${r.status === 'Hoàn thành' ? '#166534' : r.status === 'Đã trả' ? '#3730a3' : '#b45309'};">
                         ${r.status || 'Đang sửa'}
                     </span>
                 </td>
-                <td style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
-                    <div style="display: flex; flex-wrap: nowrap; gap: 4px; align-items: center;">
-                        <button onclick="app.printRepair(${index})" style="background: var(--primary-green); color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;" title="In phiếu">IN</button>
-                        <button onclick="app.viewRepairDetails(${index})" style="background: var(--primary-blue); color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 11px; white-space: nowrap;">Chi tiết</button>
-                        <button onclick="app.editRepair(${index})" style="background: var(--primary-green); color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 11px; white-space: nowrap;">Sửa</button>
-                        <button onclick="app.deleteRepair(${index})" style="background: #ef4444; color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 11px; white-space: nowrap;">Xóa</button>
+                <td data-label="Thao tác" class="repairs-col-actions" style="padding: 10px 6px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; text-align: center; vertical-align: top;">
+                    <div style="display: flex; flex-wrap: nowrap; gap: 4px; align-items: center; justify-content: center;">
+                        <button onclick="app.printRepair(${index})" style="background: var(--primary-green); color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;" title="In phiếu">IN</button>
+                        <button onclick="app.viewRepairDetails(${index})" style="background: var(--primary-blue); color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Chi tiết</button>
+                        <button onclick="app.editRepair(${index})" style="background: #f59e0b; color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Sửa</button>
+                        <button onclick="app.deleteRepair(${index})" style="background: #ef4444; color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Xóa</button>
                     </div>
                 </td>
             </tr>
@@ -6356,29 +6402,29 @@ class HamobileBanhang {
                                    oninput="app.searchRepairs(this.value)">
                         </div>
                         <div style="overflow-x: auto;">
-                            <table id="repairs-table" style="width: 100%; min-width: 900px; border-collapse: collapse; background: white; table-layout: fixed;">
+                            <table id="repairs-table" style="width: 100%; min-width: 980px; border-collapse: collapse; background: white; table-layout: fixed;">
                                 <colgroup>
-                                    <col style="width: 75px;">
-                                    <col style="width: 130px;">
-                                    <col style="width: 95px;">
-                                    <col style="width: 22%;">
-                                    <col style="width: 75px;">
-                                    <col style="width: 95px;">
-                                    <col style="width: 95px;">
-                                    <col style="width: 95px;">
-                                    <col style="width: 200px;">
+                                    <col style="width: 8.5%;">
+                                    <col style="width: 11.5%;">
+                                    <col style="width: 13%;">
+                                    <col style="width: 25.5%;">
+                                    <col style="width: 9.5%;">
+                                    <col style="width: 10.5%;">
+                                    <col style="width: 7.5%;">
+                                    <col style="width: 7.5%;">
+                                    <col style="width: 6.5%;">
                                 </colgroup>
                                 <thead>
-                                    <tr style="background: #f8fafc;">
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Mã phiếu</th>
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Khách hàng</th>
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">SĐT</th>
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Bản chất sửa chữa</th>
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Bảo hành</th>
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Ngày</th>
-                                        <th style="padding: 10px 8px; text-align: center; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Thanh toán</th>
-                                        <th style="padding: 10px 8px; text-align: center; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Trạng thái</th>
-                                        <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Thao tác</th>
+                                    <tr style="background: #f8fafc; border-bottom: 2px solid #e5e7eb;">
+                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Mã phiếu</th>
+                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Khách hàng</th>
+                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;" title="Thông tin liên hệ (SĐT & Thiết bị)">TTKH</th>
+                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Bản chất sửa chữa</th>
+                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Thời gian</th>
+                                        <th style="padding: 10px 8px; text-align: left; font-weight: 600; font-size: 13px; white-space: nowrap;">Chi phí</th>
+                                        <th style="padding: 10px 4px; text-align: center; font-weight: 600; font-size: 13px; white-space: nowrap;">Thanh toán</th>
+                                        <th style="padding: 10px 4px; text-align: center; font-weight: 600; font-size: 13px; white-space: nowrap;">Trạng thái</th>
+                                        <th style="padding: 10px 6px; text-align: center; font-weight: 600; font-size: 13px; white-space: nowrap;">Thao tác</th>
                                     </tr>
                                 </thead>
                                 <tbody>
