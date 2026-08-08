@@ -6341,6 +6341,8 @@ class HamobileBanhang {
             const descShort = desc.length > 35 ? desc.substring(0, 35) + '…' : desc || '-';
             const wInfo = this.getWarrantyStatusInfo(r);
             const warrantyBadge = wInfo ? wInfo.badge : '';
+            const phoneHtml = (r.phone && r.phone !== '-' && r.phone.trim() !== '') ? `<div style="font-size: 11px; color: #64748b; margin-top: 2px;">${escapeHtml(r.phone)}</div>` : '';
+            const deviceHtml = r.deviceName ? `<div style="font-size: 11px; color: #059669; font-weight: 500; margin-top: 2px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.deviceName)}">📱 ${escapeHtml(r.deviceName)}</div>` : '';
             return `
             <tr data-repair-index="${index}" style="border-bottom: 1px solid #f1f5f9;">
                 <td data-label="Mã phiếu" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600; vertical-align: top;">
@@ -6349,8 +6351,8 @@ class HamobileBanhang {
                 </td>
                 <td data-label="TTKH" class="repairs-col-ttkh" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">
                     <div style="font-size: 13px; color: #0f172a; font-weight: 600;">${escapeHtml(r.customerName || '-')}</div>
-                    <div style="font-size: 11px; color: #64748b; margin-top: 2px;">${escapeHtml(r.phone || '-')}</div>
-                    ${r.deviceName ? `<div style="font-size: 11px; color: #059669; font-weight: 500; margin-top: 1px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.deviceName)}">📱 ${escapeHtml(r.deviceName)}</div>` : ''}
+                    ${phoneHtml}
+                    ${deviceHtml}
                 </td>
                 <td data-label="Bản chất sửa chữa" class="repairs-col-desc" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.4; white-space: normal; word-break: normal; overflow-wrap: break-word; vertical-align: top;" title="${desc.replace(/"/g, '&quot;')}">
                     <div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: #0f172a; font-weight: 500;">${escapeHtml(descShort)}</div>
@@ -6369,12 +6371,12 @@ class HamobileBanhang {
                         ${r.status || 'Đang sửa'}
                     </span>
                 </td>
-                <td data-label="Thao tác" class="repairs-col-actions" style="padding: 10px 6px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; text-align: center; vertical-align: top;">
-                    <div style="display: flex; flex-wrap: nowrap; gap: 4px; align-items: center; justify-content: center;">
-                        <button onclick="app.printRepair(${index})" style="background: var(--primary-green); color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;" title="In phiếu">IN</button>
-                        <button onclick="app.viewRepairDetails(${index})" style="background: var(--primary-blue); color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Chi tiết</button>
-                        <button onclick="app.editRepair(${index})" style="background: #f59e0b; color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Sửa</button>
-                        <button onclick="app.deleteRepair(${index})" style="background: #ef4444; color: white; border: none; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Xóa</button>
+                <td data-label="Thao tác" class="repairs-col-actions" style="padding: 10px 4px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; text-align: center; vertical-align: top;">
+                    <div style="display: inline-flex; flex-wrap: nowrap; gap: 4px; align-items: center; justify-content: center;">
+                        <button onclick="app.printRepair(${index})" style="background: var(--primary-green); color: white; border: none; padding: 5px 7px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;" title="In phiếu">IN</button>
+                        <button onclick="app.viewRepairDetails(${index})" style="background: var(--primary-blue); color: white; border: none; padding: 5px 7px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Chi tiết</button>
+                        <button onclick="app.editRepair(${index})" style="background: #f59e0b; color: white; border: none; padding: 5px 7px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Sửa</button>
+                        <button onclick="app.deleteRepair(${index})" style="background: #ef4444; color: white; border: none; padding: 5px 7px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 11px; white-space: nowrap;">Xóa</button>
                     </div>
                 </td>
             </tr>
@@ -6402,16 +6404,16 @@ class HamobileBanhang {
                                    oninput="app.searchRepairs(this.value)">
                         </div>
                         <div style="overflow-x: auto;">
-                            <table id="repairs-table" style="width: 100%; min-width: 980px; border-collapse: collapse; background: white; table-layout: fixed;">
+                            <table id="repairs-table" style="width: 100%; min-width: 1040px; border-collapse: collapse; background: white; table-layout: fixed;">
                                 <colgroup>
-                                    <col style="width: 9.5%;">
-                                    <col style="width: 15.5%;">
-                                    <col style="width: 27.5%;">
-                                    <col style="width: 9.5%;">
-                                    <col style="width: 10.5%;">
+                                    <col style="width: 7.5%;">
+                                    <col style="width: 14%;">
+                                    <col style="width: 24%;">
+                                    <col style="width: 9%;">
+                                    <col style="width: 9%;">
                                     <col style="width: 8.5%;">
-                                    <col style="width: 8.5%;">
-                                    <col style="width: 10.5%;">
+                                    <col style="width: 8%;">
+                                    <col style="width: 20%;">
                                 </colgroup>
                                 <thead>
                                     <tr style="background: #f8fafc; border-bottom: 2px solid #e5e7eb;">
