@@ -928,58 +928,14 @@ class HamobileBanhang {
         }
         const loaded = await window.FirebaseStorage.load();
         if (haIsLoadedPosPackage(loaded)) {
-            const maybeDefaultDemo = window.FirebaseStorage.isLikelyBundledDemoData(loaded.data);
-            if (maybeDefaultDemo && !localHadData) {
-                if (window.FirebaseStorage.usesCloudProxyApi()) {
-                    if (content) content.innerHTML = '<div style="padding: 48px; text-align: center;"><p>Đang đồng bộ dữ liệu shop...</p><p style="font-size: 14px; color: #6b7280;">Vui lòng đợi...</p></div>';
-                    await new Promise(function (r) { setTimeout(r, 700); });
-                    const reloadPkg = await window.FirebaseStorage.load();
-                    const pick = haIsLoadedPosPackage(reloadPkg) ? reloadPkg : loaded;
-                    this.demoData = pick.data;
-                    window.companyAssets.logo = pick.company?.logo || null;
-                    window.companyAssets.qr = pick.company?.qrCode || pick.company?.qr || null;
-                    this.migrateProductData();
-                    this._ready = true;
-                    this.clearOldDataIfNeeded();
-                    this.init();
-                    return;
-                }
-                const cfgNow = window.FirebaseStorage.getConfig();
-                const recovered = await this.tryRecoverCloudDataByAlternateKeys(cfgNow);
-                if (recovered && recovered.loaded && recovered.loaded.data) {
-                    this.demoData = recovered.loaded.data;
-                    window.companyAssets.logo = recovered.loaded.company?.logo || null;
-                    window.companyAssets.qr = recovered.loaded.company?.qrCode || recovered.loaded.company?.qr || null;
-                    this.migrateProductData();
-                    this._ready = true;
-                    this.clearOldDataIfNeeded();
-                    this.init();
-                    return;
-                }
-                this._pendingCloudLoaded = loaded;
-                this._pendingCloudLocalHadData = localHadData;
-                if (content) {
-                    const cfgNow = window.FirebaseStorage.getConfig() || {};
-                    content.innerHTML = '<div class="fade-in" style="padding: 48px; max-width: 680px; margin: 0 auto;">' +
-                        '<h2>Mở shop trên thiết bị hoặc trình duyệt mới</h2>' +
-                        '<p style="margin: 12px 0; color:#6b7280; line-height:1.6;">Đây là <strong>bản dữ liệu mẫu</strong> đã lưu trên đám mây — thường gặp khi lần đầu mở trên máy mới, sau khi xóa cache, hoặc khi chưa có dữ liệu riêng. Dữ liệu thật của bạn <strong>không bị mất</strong> nếu vẫn đúng tài khoản và cùng mã đồng bộ như trước.</p>' +
-                        '<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:12px;margin:14px 0;font-size:13px;line-height:1.5;">' +
-                        '<div><strong>Thông tin đồng bộ:</strong> ' + escapeHtml(backupKeyHintForUi(cfgNow)) + '</div>' +
-                        '<div style="margin-top:6px;color:#0369a1;">Đa số shop chỉ cần bấm <strong>Tiếp tục</strong>. Chỉ mở Cài đặt nếu bạn đã từng tự đặt mã kho riêng trên máy khác và muốn dùng đúng mã đó.</div>' +
-                        '</div>' +
-                        '<div style="display:flex;gap:10px;flex-wrap:wrap;">' +
-                        '<button type="button" onclick="app.continueWithLoadedDemoCloudData()" style="padding:10px 14px;border:none;background:#2563eb;color:#fff;border-radius:8px;cursor:pointer;font-weight:600;">Tiếp tục</button>' +
-                        '<button type="button" onclick="app.showSettingsPage()" style="padding:10px 14px;border:1px solid #d1d5db;background:#fff;color:#111827;border-radius:8px;cursor:pointer;">Mở Cài đặt đồng bộ</button>' +
-                        '</div>' +
-                        '</div>';
-                }
-                window.app = this;
-                return;
-            }
             this.demoData = loaded.data;
             window.companyAssets.logo = loaded.company?.logo || null;
             window.companyAssets.qr = loaded.company?.qrCode || loaded.company?.qr || null;
             this.migrateProductData();
+            this._ready = true;
+            this.clearOldDataIfNeeded();
+            this.init();
+            return;
         } else if (!window._haSyncLoadFailed) {
             // Có thể DB trống — xác minh lại (tránh ghi demo đè dữ liệu thật khi mạng/Firebase trả về tạm thời sai)
             if (content) content.innerHTML = '<div style="padding: 48px; text-align: center;"><p>Đang xác minh dữ liệu...</p><p style="font-size: 14px; color: #6b7280;">Vui lòng đợi...</p></div>';
