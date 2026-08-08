@@ -4263,7 +4263,7 @@ class HamobileBanhang {
                 months,
                 daysLeft: diffDays,
                 text: `🟢 Còn BH (${diffDays} ngày — đến ${expireDateFormatted})`,
-                badge: `<div style="margin-top:4px;"><span style="display:inline-flex; align-items:center; gap:4px; padding: 3px 8px; border-radius: 6px; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; font-size: 11px; font-weight: 600; white-space: nowrap;"><span style="font-size:10px;">🟢</span> Còn BH ${diffDays}d <span style="font-weight: 400; color: #4b5563; font-size: 10px;">(${expireDateFormatted})</span></span></div>`
+                badge: `<div style="margin-top:4px;"><div style="display:inline-flex; flex-direction:column; align-items:flex-start; padding: 3px 8px; border-radius: 6px; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; font-size: 11px; font-weight: 600; line-height: 1.25;"><div style="display:flex; align-items:center; gap:3px;"><span style="font-size:9px;">🟢</span><span>Còn BH ${diffDays}d</span></div><div style="font-weight: 400; color: #4b5563; font-size: 10px; margin-top:1px;">(${expireDateFormatted})</div></div></div>`
             };
         } else {
             const absDays = Math.abs(diffDays);
@@ -4273,7 +4273,7 @@ class HamobileBanhang {
                 months,
                 daysExpired: absDays,
                 text: `🔴 Hết BH (${absDays} ngày — hết ${expireDateFormatted})`,
-                badge: `<div style="margin-top:4px;"><span style="display:inline-flex; align-items:center; gap:4px; padding: 3px 8px; border-radius: 6px; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; font-size: 11px; font-weight: 600; white-space: nowrap;"><span style="font-size:10px;">🔴</span> Hết BH <span style="font-weight: 400; color: #6b7280; font-size: 10px;">(${expireDateFormatted})</span></span></div>`
+                badge: `<div style="margin-top:4px;"><div style="display:inline-flex; flex-direction:column; align-items:flex-start; padding: 3px 8px; border-radius: 6px; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; font-size: 11px; font-weight: 600; line-height: 1.25;"><div style="display:flex; align-items:center; gap:3px;"><span style="font-size:9px;">🔴</span><span>Hết BH</span></div><div style="font-weight: 400; color: #6b7280; font-size: 10px; margin-top:1px;">(${expireDateFormatted})</div></div></div>`
             };
         }
     }
@@ -5920,19 +5920,19 @@ class HamobileBanhang {
                             ${this.getOrdersMobileListHtml(filtered, orders)}
                         </div>
                         <div style="display: ${isMobile ? 'none' : 'block'}; overflow-x: auto; -webkit-overflow-scrolling: touch;">
-                            <table id="orders-table" style="width: 100%; border-collapse: collapse; background: white; table-layout: fixed;">
+                            <table id="orders-table" style="width: 100%; border-collapse: collapse; background: white; table-layout: fixed; min-width: 960px;">
                                 <colgroup>
                                     <col style="width: 3.5%;">
-                                    <col style="width: 17%;">
+                                    <col style="width: 14%;">
                                     <col style="width: 10%;">
-                                    <col style="width: 8%;">
+                                    <col style="width: 7.5%;">
                                     <col style="width: 8%;">
                                     <col style="width: 20%;">
-                                    <col style="width: 10.5%;">
+                                    <col style="width: 10%;">
                                     <col style="width: 9.5%;">
                                     <col style="width: 6.5%;">
-                                    <col style="width: 4%;">
-                                    <col style="width: 3%;">
+                                    <col style="width: 5.5%;">
+                                    <col style="width: 5.5%;">
                                 </colgroup>
                                 <thead>
                                     <tr style="background: #f8fafc;">
@@ -5945,8 +5945,8 @@ class HamobileBanhang {
                                         <th class="orders-col-time" style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Thời gian</th>
                                         <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Tổng tiền</th>
                                         <th style="padding: 10px 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Thanh toán</th>
-                                        <th style="padding: 10px 4px; text-align: center; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">TT nhanh</th>
-                                        <th style="padding: 10px 6px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px;">Thao tác</th>
+                                        <th style="padding: 10px 4px; text-align: center; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px; white-space: nowrap;">TT nhanh</th>
+                                        <th style="padding: 10px 6px; text-align: center; border-bottom: 2px solid #e5e7eb; font-weight: 600; font-size: 13px; white-space: nowrap;">Thao tác</th>
                                     </tr>
                                 </thead>
                                 <tbody>
