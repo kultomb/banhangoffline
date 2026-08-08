@@ -9287,9 +9287,19 @@ class HamobileBanhang {
                                 </select>
                             </div>
                             
-                            <div style="font-size: 12px; color: #6b7280;">
+                            <div style="font-size: 12px; color: #6b7280; margin-bottom: 14px;">
                                 Trạng thái: <span id="backup-status">${autoBackupEnabled ? (backupInterval === '0' ? '🟢 Ngay khi thay đổi' : '🟢 Đang hoạt động') : '🔴 Tắt'}</span><br>
                                 Lần cuối: <span id="backup-last-time">${lastBackupStr}</span>
+                            </div>
+
+                            <div style="padding-top: 12px; border-top: 1px dashed #e5e7eb;">
+                                <button type="button" onclick="app.forceRefreshCloudData()" id="btn-force-cloud-refresh" 
+                                        style="width: 100%; background: linear-gradient(135deg, #2563eb, #3b82f6); color: white; padding: 10px 12px; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; box-shadow: 0 2px 6px rgba(37,99,235,0.25);">
+                                    <span>☁️</span> Nạp dữ liệu mới nhất từ Đám mây
+                                </button>
+                                <div style="font-size: 11px; color: #6b7280; margin-top: 6px; line-height: 1.35;">
+                                    Buộc kéo 100% dữ liệu mới nhất từ Server (bỏ qua mọi Cache trình duyệt).
+                                </div>
                             </div>
                         </div>
                         
@@ -11423,6 +11433,47 @@ class HamobileBanhang {
             this.showNotification('Đã tải file và lưu bản lịch sử thành công.', 'success');
         } else if (r && r.hadDownload) {
             this.showNotification('Đã tải xuống file sao lưu.', 'success');
+        }
+    }
+
+    async forceRefreshCloudData() {
+        if (typeof confirmAsync === 'function') {
+            const ok = await confirmAsync({
+                title: 'Nạp dữ liệu mới nhất từ Cloud?',
+                message: 'Thao tác này sẽ kéo 100% dữ liệu mới nhất từ Cloud Server về máy (bỏ qua mọi Cache trình duyệt). Bạn có muốn tiếp tục?',
+                confirmLabel: 'Đồng ý Nạp',
+                cancelLabel: 'Hủy'
+            });
+            if (!ok) return;
+        }
+
+        const btn = document.getElementById('btn-force-cloud-refresh');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span>🔄</span> Đang nạp dữ liệu từ Cloud...';
+        }
+
+        try {
+            this.showNotification('Đang nạp dữ liệu mới nhất từ Đám mây...', 'info');
+            const loaded = await window.FirebaseStorage.load();
+            if (loaded && loaded.data && Array.isArray(loaded.data.products)) {
+                this.demoData = loaded.data;
+                if (typeof this.saveToLocalStorage === 'function') this.saveToLocalStorage();
+                const prodCount = (loaded.data.products || []).length;
+                const orderCount = (loaded.data.orders || []).length;
+                this.showNotification(`✅ Đã nạp thành công ${prodCount} sản phẩm và ${orderCount} đơn hàng từ Đám mây.`, 'success');
+                this.loadPage(this.currentPage || 'settings');
+            } else {
+                this.showNotification('Không tìm thấy dữ liệu trên Đám mây hoặc kết nối bị gián đoạn.', 'warning');
+            }
+        } catch (err) {
+            console.error('forceRefreshCloudData error:', err);
+            this.showNotification('Lỗi nạp dữ liệu từ Đám mây. Vui lòng thử lại.', 'error');
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<span>☁️</span> Nạp dữ liệu mới nhất từ Đám mây';
+            }
         }
     }
 
