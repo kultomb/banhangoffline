@@ -4263,7 +4263,7 @@ class HamobileBanhang {
                 months,
                 daysLeft: diffDays,
                 text: `🟢 Còn BH (${diffDays} ngày — đến ${expireDateFormatted})`,
-                badge: `<div style="margin-top:4px;"><div style="display:inline-flex; flex-direction:column; align-items:flex-start; padding: 2px 6px; border-radius: 5px; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; font-size: 10px; font-weight: 600; line-height: 1.2;"><div style="display:flex; align-items:center; gap:2px;"><span style="font-size:8px;">🟢</span><span>Còn BH ${diffDays}d</span></div><div style="font-weight: 400; color: #4b5563; font-size: 9px; margin-top:1px;">(${expireDateFormatted})</div></div></div>`
+                badge: `<div style="margin-top:4px; font-size:11px; color:#047857; font-weight:500; display:flex; align-items:center; gap:4px; flex-wrap:nowrap;"><span style="font-size:10px;">🟢</span><span style="font-weight:600;">Còn BH ${diffDays}d</span><span style="color:#64748b; font-size:11px;">(Đến ngày ${expireDateFormatted})</span></div>`
             };
         } else {
             const absDays = Math.abs(diffDays);
@@ -4273,7 +4273,7 @@ class HamobileBanhang {
                 months,
                 daysExpired: absDays,
                 text: `🔴 Hết BH (${absDays} ngày — hết ${expireDateFormatted})`,
-                badge: `<div style="margin-top:4px;"><div style="display:inline-flex; flex-direction:column; align-items:flex-start; padding: 2px 6px; border-radius: 5px; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; font-size: 10px; font-weight: 600; line-height: 1.2;"><div style="display:flex; align-items:center; gap:2px;"><span style="font-size:8px;">🔴</span><span>Hết BH</span></div><div style="font-weight: 400; color: #6b7280; font-size: 9px; margin-top:1px;">(${expireDateFormatted})</div></div></div>`
+                badge: `<div style="margin-top:4px; font-size:11px; color:#b91c1c; font-weight:500; display:flex; align-items:center; gap:4px; flex-wrap:nowrap;"><span style="font-size:10px;">🔴</span><span style="font-weight:600;">Hết BH</span><span style="color:#64748b; font-size:11px;">(Hết ngày ${expireDateFormatted})</span></div>`
             };
         }
     }
@@ -5979,14 +5979,16 @@ class HamobileBanhang {
                         ${cancelBadge}
                     </div>
                     ${imeiBadge}
-                    ${warrantyBadge}
                 </td>
                 <td data-label="Khách hàng" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; font-weight: 500;">${escapeHtml(order.customerName || '-')}</td>
                 <td data-label="TTKH" class="orders-col-ttkh" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top;">
                     <div style="font-size: 13px; color: #0f172a; font-weight: 500;">${escapeHtml(order.phone || '-')}</div>
                     <div style="font-size: 11px; color: #64748b; margin-top: 2px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(order.address || '')}">${escapeHtml(order.address || '-')}</div>
                 </td>
-                <td data-label="Sản phẩm" class="orders-col-products" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.4; white-space: normal; word-break: normal; overflow-wrap: break-word; vertical-align: top;" title="${escapeHtml(productsStr)}"><div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;">${escapeHtml(productsStr.length > 90 ? productsStr.substring(0, 90) + '…' : productsStr)}</div></td>
+                <td data-label="Sản phẩm" class="orders-col-products" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; line-height: 1.4; white-space: normal; word-break: normal; overflow-wrap: break-word; vertical-align: top;" title="${escapeHtml(productsStr)}">
+                    <div style="display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: #0f172a; font-weight: 500;">${escapeHtml(productsStr.length > 90 ? productsStr.substring(0, 90) + '…' : productsStr)}</div>
+                    ${warrantyBadge}
+                </td>
                 <td data-label="Thời gian" class="orders-col-time" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; white-space: nowrap;">${order.date || ''}<br><span style="font-size:11px; color:#64748b;">${order.time || ''}</span></td>
                 <td data-label="Tổng tiền" style="padding: 10px 8px; border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 700; color: #0f172a; vertical-align: top; white-space: nowrap;">${(order.total || 0).toLocaleString('vi-VN')} VNĐ</td>
                 <td data-label="Thanh toán" style="padding: 10px 6px; border-bottom: 1px solid #e5e7eb; font-size: 13px; vertical-align: top; text-align: center; white-space: nowrap;">${escapeHtml(order.paymentMethod || '-')}</td>
